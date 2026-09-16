@@ -1,0 +1,43 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文影 · 数据后台</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body>
+  <div class="admin-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">文</span><div><strong>文影</strong><small>数据库后台</small></div></div>
+      <nav class="nav" id="table-nav"></nav>
+      <div class="side-note"><span class="dot"></span><div><strong>本地管理模式</strong><small>仅监听 127.0.0.1</small></div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><span class="eyebrow">CONTROL CENTER</span><h1>数据管理</h1><p>查看、编辑和追溯项目数据库中的内容。</p></div>
+        <div class="top-actions"><button class="button ghost" id="refresh-all">刷新</button><button class="button primary" id="open-sql-help">使用说明</button></div>
+      </header>
+      <section id="overview" class="overview-grid"></section>
+      <section class="content-panel">
+        <div class="panel-toolbar">
+          <div><span class="eyebrow">DATA TABLE</span><h2 id="table-title">选择一张表</h2></div>
+          <div class="toolbar-actions"><label class="search"><span>⌕</span><input id="search-input" placeholder="搜索当前表…" /></label><button class="button ghost" id="prev-page">上一页</button><button class="button ghost" id="next-page">下一页</button></div>
+        </div>
+        <div class="table-meta" id="table-meta"></div>
+        <div class="table-wrap"><table><thead id="data-head"></thead><tbody id="data-body"></tbody></table></div>
+        <div class="empty" id="empty-state">从左侧选择数据表开始查看。</div>
+      </section>
+    </main>
+  </div>
+  <div class="modal-backdrop hidden" id="modal-backdrop">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-head"><div><span class="eyebrow" id="modal-eyebrow">RECORD</span><h2 id="modal-title">编辑记录</h2></div><button class="icon-button" id="close-modal" aria-label="关闭">×</button></div>
+      <div class="modal-body" id="form-fields"></div>
+      <div class="modal-foot"><span class="form-hint" id="form-hint">主键不可修改。</span><div><button class="button ghost" id="cancel-modal">取消</button><button class="button primary" id="save-row">保存修改</button></div></div>
+    </section>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script type="module" src="/admin.js"></script>
+</body>
+</html>

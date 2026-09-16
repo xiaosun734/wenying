@@ -59,3 +59,9 @@ AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LL
 ```bash
 pnpm test
 ```
+
+## Database Admin
+
+Open `http://127.0.0.1:4173/admin` after starting the service to view and edit projects, segments, shots, media assets, tasks, and knowledge tables in SQLite. The admin page supports pagination, search, JSON field editing, and record deletion.
+
+The database file is `data/wenying.sqlite`. The admin endpoint is bound to localhost; stop the service and back up the database before direct edits.

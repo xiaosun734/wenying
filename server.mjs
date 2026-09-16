@@ -79,7 +79,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const relative = pathname === '/' ? '/index.html' : pathname;
+  const relative = pathname === '/' ? '/index.html' : (pathname === '/admin' || pathname === '/admin/' ? '/admin.html' : pathname);
   const filePath = normalize(join(root, relative));
   const relativePath = relativePathFn(root, filePath);
   if (filePath !== root && (relativePath === '..' || relativePath.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(relativePath))) {

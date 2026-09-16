@@ -57,6 +57,7 @@ import {
 import { auditText, cleanSourceText } from './safety.mjs';
 import { PROMPT_VERSION, DIRECTOR_PROMPT_VERSION, CAMERA_PROMPT_VERSION, STORYBOARD_PROMPT_VERSION } from './providers/openai-compatible.mjs';
 import { buildGenerationSpec, compileVideoPrompt } from './storyboard-task.mjs';
+import { AdminDbError, deleteAdminRow, getAdminOverview, listAdminRows, listAdminTables, updateAdminRow } from './admin-db.mjs';
 
 const JSON_LIMIT = 2 * 1024 * 1024;
 const allowedGenres = new Set(['玄幻', '都市', '悬疑', '言情', '历史', '科幻', '其他', 'fantasy', 'urban', 'mystery', 'romance', 'history', 'scifi', 'other']);
@@ -303,8 +304,36 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
     try {
       const method = req.method || 'GET';
       const parts = pathname.replace(/^\/api\/v1\/?/, '').split('/').filter(Boolean);
+      const query = new URLSearchParams(String(req.url || '').split('?')[1] || '');
 
       if (method === 'GET' && parts.length === 0) return ok(res, { ok: true, service: 'wenying-api' });
+
+      if (parts[0] === 'admin') {
+        if (method === 'GET' && parts[1] === 'overview' && parts.length === 2) {
+          return ok(res, { overview: getAdminOverview(db) });
+        }
+        if (method === 'GET' && parts[1] === 'tables' && parts.length === 2) {
+          return ok(res, { tables: listAdminTables(db) });
+        }
+        if (parts[1] === 'tables' && parts[2]) {
+          const tableName = parts[2];
+          if (method === 'GET' && parts.length === 3) {
+            return ok(res, listAdminRows(db, tableName, {
+              search: query.get('search') || '',
+              limit: query.get('limit') || 50,
+              offset: query.get('offset') || 0,
+            }));
+          }
+          if (method === 'PATCH' && parts[3] && parts.length === 4) {
+            const body = await readJson(req);
+            return ok(res, { row: updateAdminRow(db, tableName, parts[3], body) });
+          }
+          if (method === 'DELETE' && parts[3] && parts.length === 4) {
+            return ok(res, deleteAdminRow(db, tableName, parts[3]));
+          }
+        }
+        throw new AdminDbError(404, 'ADMIN_NOT_FOUND', 'Admin endpoint not found');
+      }
 
       if (method === 'POST' && parts[0] === 'projects' && parts.length === 1) {
         const body = await readJson(req);
