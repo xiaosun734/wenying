@@ -41,7 +41,7 @@ RAG 的职责是为镜头选择提供少量、可引用的摄影与剪辑知识�
 - `generateDirectorAnalysis()`：只输出剧情节拍、情绪、动作、场景、叙事目的和连续性约束。
 - `generateShotSelection()`：结合导演分析、视觉设定、生成配置和 RAG 证据选择镜头语言。
 - `generateStoryboard()`：把上游已确定的决策组装成最终分镜表，不重新改写导演意图。
-- Mock Provider 的对应实现，保证无外部 API 时仍可跑通完整流程。
+- 真实 Provider 的对应实现；未配置外部 API 时任务明确失败。
 - `director-analysis-v1`、`shot-selection-rag-v1`、`storyboard-v1` 三个提示词版本。
 
 同时修复了旧 `requestStructured()` 的真实调用问题。旧实现先把响应解析成改写结果，随后又尝试从结果读取 `choices`，可能使真实模型的视觉设定和分镜 JSON 退化为空对象。现在底层请求只返回原始 Provider payload，文案和结构化任务分别解析。
@@ -161,7 +161,7 @@ queued
 - `dissolve`：FFmpeg `xfade=fade`。
 - `fade`：FFmpeg `xfade=fadeblack`。
 
-`MockComposer` 会记录转场摘要；`FfmpegComposer` 只有在存在需要渲染的转场时才使用 filter graph，否则保留更简单的 concat 流程。
+FfmpegComposer records transition summaries and uses a filter graph only when a rendered transition is required.
 
 ### 2.7 API
 
@@ -263,7 +263,7 @@ StoryboardPlan v1
 6. 视觉设定改变后的分层失效仍以“创建新的策划任务”处理，尚未提供差异化局部失效按钮。
 7. 转场只在片段内部由 Composer 实际使用；跨片段转场已经存储，但项目级最终导出尚未消费该关系。
 8. 真实 LLM 依赖 `.env` 中六个三层提示词配置。Mock 模式已完整验证，真实 DeepSeek 的输出质量仍需使用有效 API Key 做样本评估。
-9. FFmpeg `xfade` 路径已实现，但自动化测试当前使用 Mock Composer，没有运行真实 FFmpeg 媒体集成测试。
+FFmpeg Composer is used for real media composition and integration tests.
 10. 项目目录当前不是 Git 仓库，无法提供 commit 或 diff 状态；修改直接落在共享工作区。
 
 ## 5. 下一阶段计划

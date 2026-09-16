@@ -8,7 +8,7 @@
 
 - 新增 `server/db.mjs`：Node 24 `node:sqlite` 数据库初始化、项目、任务、文案版本、片段、事务、草稿 revision 和任务恢复查询。
 - 新增 `server/safety.mjs`：输入/输出清洗、基础敏感词审核。
-- 新增 `server/providers/openai-compatible.mjs`：DeepSeek/OpenAI 兼容 Chat Completions Provider、固定 `rewrite-v1` Prompt、Mock Provider、重试和结构化结果校验。
+- 新增 `server/providers/openai-compatible.mjs`：DeepSeek/OpenAI 兼容 Chat Completions Provider、固定 `rewrite-v1` Prompt、真实 Provider、重试和结构化结果校验。
 - 新增 `server/rewrite-task.mjs`：单并发任务队列、任务状态更新、失败处理、手动重试、服务重启恢复。
 - 新增 `server/api.mjs`：项目、改写任务、任务状态、重试、版本、片段、草稿保存、确认文案 API。
 - 已替换 `server.mjs`：同源 API + 静态文件服务、`.env` 加载、数据库初始化、任务恢复、优雅退出。
@@ -25,7 +25,7 @@
 
 - 已新增作品级/片段级视频生成任务、任务恢复、重试和取消状态。
 - 已新增片段版本、音频/字幕/视频/BGM/导出素材记录。
-- 已接入 `MockMediaProvider`，本地可完整跑通配音、字幕、画面、BGM 和素材状态流转。
+- Real media providers are now used: ComfyUI, Doubao TTS, JSON subtitles, and FFmpeg; missing providers fail explicitly.
 - 已接入单段重生成，成功后切换 `active_version_id`，失败时保留旧版本。
 - 已接入 Mock 导出任务，支持比例、分辨率、导出进度和导出记录。
 - 前端生成页已从本地模拟计时器切换为任务 API 轮询，支持刷新恢复、失败重试和片段状态展示。
@@ -38,7 +38,7 @@
 - 数据库 schema 升级到 v4，新增 `segment_shots` 和 `media_assets.shot_id`。
 - 新增中文分镜生成、`/projects/:id/storyboard-tasks` 与 `/shots/:id/prompt` 接口；视频模型直接使用中文镜头提示词。
 - 片段任务现按“配音 → 分镜 → 单镜头视频 → 片段合成”执行，最终片段仍写入 `type=video` 以兼容导出。
-- 新增 Mock/FFmpeg Composer 与可选豆包 TTS Provider；默认配置仍为 Mock。
+FFmpeg Composer is used for real media composition and integration tests.
 - 前端新增中文镜头审核页和编辑器镜头提示词列表。
 
 ## 继续时的优先顺序
@@ -51,4 +51,4 @@
 - 当前前端仍保留原始 demo `segments`，真实任务成功后才会被 API 结果替换；没有 active project 时工作台仍显示 demo 数据，这是预期的兼容状态。
 - 当前未引入第三方依赖；SQLite 使用 Node 24 实验性内置模块。
 - 默认 Provider 是 DeepSeek，未配置 `LLM_API_KEY` 时任务会进入失败状态，不会静默使用 Mock；本地演示需显式设置 `LLM_PROVIDER=mock`。
-- 已使用 Mock Provider 完成服务启动、静态文件、任务、草稿、确认和不可变版本 smoke test；真实 DeepSeek 需要用户提供 API Key。
+- 已使用测试 Fixture 完成服务启动、静态文件、任务、草稿、确认和不可变版本 smoke test；真实 DeepSeek 需要用户提供 API Key。

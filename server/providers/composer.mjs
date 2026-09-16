@@ -3,18 +3,6 @@ import { resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { probeMedia } from '../media-probe.mjs';
 
-export class MockComposer {
-  constructor() { this.provider = 'mock'; this.model = 'mock-concat-v1'; }
-  async composeSegment({ project, segmentVersion, shots, transitions = [], audioAsset }) {
-    return {
-      objectKey: `mock/video/${segmentVersion.id}.mp4`,
-      durationMs: audioAsset?.durationMs || segmentVersion.duration_ms,
-      sizeBytes: Math.max(1024 * 512, segmentVersion.duration_ms * 128),
-      metadata: { shotCount: shots.length, transitions: transitionSummary(shots, transitions), audio: Boolean(audioAsset?.objectKey) },
-    };
-  }
-}
-
 export class FfmpegComposer {
   constructor({ mediaRoot = './data/media', ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', fps = 24 } = {}) {
     this.provider = 'ffmpeg';
@@ -93,14 +81,16 @@ export class FfmpegComposer {
 }
 
 export function createComposerProvider({ mediaRoot } = {}) {
-  return String(process.env.COMPOSER_PROVIDER || 'mock').toLowerCase() === 'ffmpeg'
-    ? new FfmpegComposer({
-      mediaRoot,
-      ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
-      ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
-      fps: Number(process.env.COMFYUI_FPS || 24),
-    })
-    : new MockComposer();
+  const provider = String(process.env.COMPOSER_PROVIDER || 'ffmpeg').toLowerCase();
+  if (provider !== 'ffmpeg') {
+    throw new Error(`COMPOSER_PROVIDER 必须配置为 ffmpeg，当前值为 ${provider}`);
+  }
+  return new FfmpegComposer({
+    mediaRoot,
+    ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+    ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+    fps: Number(process.env.COMFYUI_FPS || 24),
+  });
 }
 
 function safe(value) { return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_'); }

@@ -61,36 +61,6 @@ export class ComfyUiMediaProvider {
     this.ffprobePath = ffprobePath || process.env.FFPROBE_PATH || 'ffprobe';
   }
 
-  // TTS, subtitles and BGM are intentionally separate providers. These
-  // lightweight records keep the existing task pipeline working until those
-  // providers are connected to real services.
-  async synthesize({ segmentVersion }) {
-    return {
-      objectKey: `mock/audio/${segmentVersion.id}.mp3`,
-      durationMs: segmentVersion.duration_ms,
-      sizeBytes: Math.max(2048, Math.round(segmentVersion.duration_ms * 4.2)),
-      metadata: { provider: 'mock', voiceId: segmentVersion.voice_id, timedWords: true },
-    };
-  }
-
-  async createSubtitles({ segmentVersion }) {
-    return {
-      objectKey: `mock/subtitles/${segmentVersion.id}.json`,
-      durationMs: segmentVersion.duration_ms,
-      sizeBytes: Math.max(256, Array.from(segmentVersion.script_text || '').length * 5),
-      metadata: { provider: 'mock', style: 'basic-outline', position: 'bottom', text: segmentVersion.script_text },
-    };
-  }
-
-  async matchBgm({ project }) {
-    return {
-      objectKey: `mock/bgm/${project.id}.mp3`,
-      durationMs: 0,
-      sizeBytes: 1024 * 128,
-      metadata: { provider: 'mock', policy: 'auto', genre: project.genre, ducking: -16 },
-    };
-  }
-
   async generateVideo({ project, segmentVersion, shot = null }) {
     this.assertConfigured();
     const workflow = await this.loadWorkflow();

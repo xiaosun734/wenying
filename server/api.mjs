@@ -119,6 +119,18 @@ function projectDto(project) {
   };
 }
 
+function projectListDto(db, project) {
+  const versionId = project.active_script_version_id || project.draft_script_version_id;
+  const segments = versionId ? listSegments(db, versionId) : [];
+  const durationMs = segments.reduce((total, segment) => total + Number(segment.duration_ms || 0), 0);
+  return {
+    ...projectDto(project),
+    segmentCount: segments.length,
+    durationMs,
+    duration: formatDuration(durationMs),
+  };
+}
+
 function taskDto(task) {
   if (!task) return null;
   return {
@@ -355,7 +367,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
       }
 
       if (method === 'GET' && parts[0] === 'projects' && parts.length === 1) {
-        return ok(res, { projects: listProjects(db).map(projectDto) });
+        return ok(res, { projects: listProjects(db).map(project => projectListDto(db, project)) });
       }
 
       if (parts[0] === 'projects' && parts[1] && parts.length >= 2) {

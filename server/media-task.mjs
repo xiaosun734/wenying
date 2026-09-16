@@ -46,10 +46,12 @@ function assetByType(assets, type) {
 }
 
 export class MediaTaskRunner {
-  constructor({ db, provider, ttsProvider = null, textProvider = null, composer = null, logger = console }) {
+  constructor({ db, provider, ttsProvider = null, subtitleProvider = null, textProvider = null, composer = null, requireAudio = true, logger = console }) {
     this.db = db;
     this.provider = provider;
-    this.ttsProvider = ttsProvider || provider;
+    this.ttsProvider = ttsProvider;
+    this.subtitleProvider = subtitleProvider;
+    this.requireAudio = Boolean(requireAudio);
     this.textProvider = textProvider;
     this.composer = composer;
     this.logger = logger;
@@ -125,16 +127,7 @@ export class MediaTaskRunner {
       return;
     }
 
-    updateGenerationTask(this.db, task.id, { current_step: 'matching_bgm', progress: 95, updated_at: timestamp() });
-    const projectAssets = listMediaAssets(this.db, { projectId: project.id });
-    if (!assetByType(projectAssets, 'bgm')) {
-      const bgm = await this.provider.matchBgm({ project });
-      createMediaAsset(this.db, {
-        id: randomUUID(), projectId: project.id, type: 'bgm', provider: this.provider.provider,
-        model: this.provider.model, objectKey: bgm.objectKey, durationMs: bgm.durationMs,
-        sizeBytes: bgm.sizeBytes, metadata: bgm.metadata,
-      });
-    }
+    updateGenerationTask(this.db, task.id, { current_step: 'finalizing_segments', progress: 95, updated_at: timestamp() });
 
     const childTasks = listGenerationTasks(this.db, task.id);
     failed = childTasks.filter(item => item.status === 'failed').length;
@@ -194,12 +187,16 @@ export class MediaTaskRunner {
     try {
       let assets = listMediaAssets(this.db, { segmentVersionId: version.id });
       if (!assetByType(assets, 'audio')) {
-        const audio = await this.ttsProvider.synthesize({ project, segmentVersion: version });
-        createMediaAsset(this.db, {
-          id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'audio',
-          provider: this.ttsProvider.provider, model: this.ttsProvider.model, objectKey: audio.objectKey,
-          durationMs: audio.durationMs, sizeBytes: audio.sizeBytes, metadata: audio.metadata,
-        });
+        if (this.ttsProvider) {
+          const audio = await this.ttsProvider.synthesize({ project, segmentVersion: version });
+          createMediaAsset(this.db, {
+            id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'audio',
+            provider: this.ttsProvider.provider, model: this.ttsProvider.model, objectKey: audio.objectKey,
+            durationMs: audio.durationMs, sizeBytes: audio.sizeBytes, metadata: audio.metadata,
+          });
+        } else if (this.requireAudio) {
+          throw Object.assign(new Error('Real TTS provider is not configured'), { code: 'TTS_NOT_CONFIGURED' });
+        }
       }
 
       const refreshedAudio = listMediaAssets(this.db, { segmentVersionId: version.id });
@@ -235,10 +232,11 @@ export class MediaTaskRunner {
       updateSegmentVersion(this.db, version.id, { status: 'generating_subtitles', updated_at: timestamp() });
       assets = listMediaAssets(this.db, { segmentVersionId: version.id });
       if (!assetByType(assets, 'subtitle')) {
-        const subtitle = await this.provider.createSubtitles({ project, segmentVersion: { ...version, duration_ms: actualDurationMs } });
+        if (!this.subtitleProvider) throw Object.assign(new Error('Subtitle provider is not configured'), { code: 'SUBTITLE_NOT_CONFIGURED' });
+        const subtitle = await this.subtitleProvider.createSubtitles({ project, segmentVersion: { ...version, duration_ms: actualDurationMs } });
         createMediaAsset(this.db, {
           id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'subtitle',
-          provider: this.provider.provider, model: this.provider.model, objectKey: subtitle.objectKey,
+          provider: this.subtitleProvider.provider, model: this.subtitleProvider.model, objectKey: subtitle.objectKey,
           durationMs: subtitle.durationMs, sizeBytes: subtitle.sizeBytes, metadata: subtitle.metadata,
         });
       }

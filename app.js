@@ -1,4 +1,4 @@
-﻿const app = document.querySelector('#app');
+const app = document.querySelector('#app');
 const toastRoot = document.querySelector('#toast-root');
 
 const icons = {
@@ -35,18 +35,7 @@ function icon(name, size = 17, stroke = 1.8) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.spark}</svg>`;
 }
 
-const sourceText = `深夜十一点，沈砚在废弃的地铁站醒来。
-他记得自己正在参加一场葬礼，却想不起死者是谁。站台的电子屏反复闪烁着同一个时间：23:17。远处传来列车进站的轰鸣，广播里却没有报站名，只有一个沙哑的女声在一遍遍叫他的名字。
-
-沈砚拿出手机，屏幕上多了一张陌生的照片。照片里是三年前的自己，身边站着一个看不清脸的女孩。照片背面写着一句话：不要让她上车。
-
-列车停在他面前时，车门缓缓打开。车厢里空无一人，唯独最后一排亮着一盏灯。那盏灯下，女孩抬起头，露出和照片里一模一样的侧脸。她对沈砚说，第一班车已经错过了，而他只有十分钟可以活着离开这里。
-
-沈砚转身就跑，可身后的站台不知何时变成了一条没有尽头的隧道。手机再次亮起，新的照片正在自动生成——照片里，他已经坐在了女孩身边。
-
-他猛地停下脚步，隧道里的灯一盏接一盏熄灭。最后一盏灯下，墙面浮出一行新鲜的血字：如果听见身后的脚步声，千万不要回头。可脚步声已经贴在了他的耳边，女孩的声音也从黑暗里传来，她说自己等这一天已经等了三年。
-
-沈砚攥紧那张照片，终于想起葬礼上没有死者，只有一个失踪的人。那个人不是女孩，而是三年前为了救她，独自走进地铁隧道的自己。就在这时，列车再次进站，车门里传来一个熟悉的声音：这一次，换你留下。`;
+const sourceText = '';
 
 const state = {
   view: 'dashboard',
@@ -103,19 +92,10 @@ const state = {
   segmentSaveTimers: new Map(),
   segmentSaveStatus: new Map(),
   segmentSavePromises: new Map(),
-  segments: [
-    { title: '深夜地铁站', duration: '00:32', status: 'ready', script: '深夜十一点，沈砚在废弃的地铁站醒来。\n他记得自己正在参加一场葬礼，却想不起死者是谁。站台的电子屏反复闪烁着同一个时间：23:17。' },
-    { title: '照片里的女孩', duration: '00:38', status: 'ready', script: '沈砚拿出手机，屏幕上多了一张陌生的照片。照片里是三年前的自己，身边站着一个看不清脸的女孩。照片背面写着一句话：不要让她上车。' },
-    { title: '末班车', duration: '00:41', status: 'modified', script: '列车停在他面前时，车门缓缓打开。车厢里空无一人，唯独最后一排亮着一盏灯。那盏灯下，女孩抬起头，露出和照片里一模一样的侧脸。' },
-    { title: '十分钟倒计时', duration: '00:36', status: 'ready', script: '她对沈砚说，第一班车已经错过了，而他只有十分钟可以活着离开这里。沈砚转身就跑，身后的站台却变成了没有尽头的隧道。' },
-    { title: '自动生成的照片', duration: '00:39', status: 'ready', script: '手机再次亮起，新的照片正在自动生成。照片里，他已经坐在了女孩身边。可这一次，照片中的沈砚抬起了头。' },
-    { title: '不要回头', duration: '00:34', status: 'ready', script: '隧道尽头传来脚步声，一步、两步，像是有人正沿着他的影子追来。沈砚终于明白，照片里的女孩一直都在等他回头。' },
-  ],
-  projects: [
-    { title: '夜行者', genre: '悬疑', type: 'cover-night', cover: '夜行者', status: 'processing', statusText: '正在生成', duration: '预计 4:20', segments: '12 个片段', updated: '刚刚', progress: 66 },
-    { title: '长安旧梦', genre: '历史', type: 'cover-heaven', cover: '长安旧梦', status: 'ready', statusText: '已完成', duration: '06:12', segments: '18 个片段', updated: '昨天', progress: 100 },
-    { title: '逆光之城', genre: '都市', type: 'cover-city', cover: '逆光之城', status: 'draft', statusText: '文案草稿', duration: '—', segments: '待生成', updated: '9 月 4 日', progress: 0 },
-  ],
+  segments: [],
+
+  projects: [],
+
 };
 
 const pageTitles = {
@@ -204,7 +184,7 @@ function syncProjectState(payload) {
   state.title = project.title || state.title;
   state.genre = project.genre || state.genre;
   state.scriptVersionId = payload.version?.id || project.draftScriptVersionId || project.activeScriptVersionId || null;
-  if (Array.isArray(payload.segments) && payload.segments.length) {
+  if (Array.isArray(payload.segments)) {
     state.segments = payload.segments.map(clientSegment);
   }
   if (payload.task && !payload.task.type && !payload.task.storyboardPlanId) {
@@ -235,6 +215,63 @@ function syncProjectState(payload) {
   }
 }
 
+function projectStatus(project) {
+  const raw = String(project.status || '').toLowerCase();
+  if (raw === 'draft' || raw === 'script_ready' || raw === 'storyboard_review') return { kind: 'draft', label: raw === 'draft' ? '草稿' : raw === 'storyboard_review' ? '待审核' : '文案待确认' };
+  if (raw.includes('processing') || raw.includes('queued')) return { kind: 'processing', label: '处理中' };
+  if (raw === 'ready' || raw === 'exported') return { kind: 'ready', label: raw === 'exported' ? '已导出' : '已完成' };
+  if (raw.includes('failed')) return { kind: 'draft', label: '生成失败' };
+  return { kind: 'draft', label: raw || '未开始' };
+}
+
+function projectUpdatedLabel(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+function clientProject(project) {
+  const status = projectStatus(project);
+  const type = project.genre === '历史' ? 'cover-heaven' : project.genre === '都市' ? 'cover-city' : 'cover-night';
+  const count = Number(project.segmentCount || 0);
+  return {
+    id: project.id,
+    title: project.title,
+    genre: project.genre,
+    type,
+    cover: project.title || '未命名作品',
+    status: status.kind,
+    statusText: status.label,
+    duration: project.duration && project.duration !== '0:00' ? project.duration : '—',
+    segments: count ? `${count} 个片段` : '待生成',
+    updated: projectUpdatedLabel(project.updatedAt),
+    progress: status.kind === 'ready' ? 100 : status.kind === 'processing' ? 50 : 0,
+  };
+}
+
+async function loadProjects() {
+  const payload = await apiRequest('/projects');
+  state.projects = Array.isArray(payload.projects) ? payload.projects.map(clientProject) : [];
+  return state.projects;
+}
+
+async function openProject(projectId) {
+  if (!projectId) return;
+  stopPolling();
+  try {
+    const payload = await apiRequest(`/projects/${encodeURIComponent(projectId)}`);
+    syncProjectState(payload);
+    const status = String(payload.project?.status || '');
+    state.view = payload.segments?.length
+      ? (status === 'ready' || status === 'exported' ? 'editor' : 'script-preview')
+      : 'dashboard';
+    render();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
 function stopPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = null;
@@ -250,6 +287,7 @@ async function pollScriptTask() {
       stopPolling();
       state.submitPending = false;
       state.scriptError = null;
+      void loadProjects();
       state.selectedSegment = 0;
       state.view = 'script-preview';
       render();
@@ -287,6 +325,7 @@ async function pollGenerationTask() {
       state.generationComplete = task.status === 'succeeded';
       if (task.status === 'succeeded') {
         state.regenerating = false;
+        void loadProjects();
         state.view = task.type === 'segment' ? 'editor' : 'generation';
         render();
         showToast(task.type === 'segment' ? '本段已重新生成，已替换为新版本。' : '视频片段全部生成完成，进入编辑器预览吧。');
@@ -470,10 +509,28 @@ function pageHeader(eyebrow, title, subtitle, action = '') {
   return `<div class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1 class="page-title">${title}</h1>${subtitle ? `<p class="page-subtitle">${subtitle}</p>` : ''}</div>${action}</div>`;
 }
 
+function todayLabel() {
+  return new Date().toLocaleDateString('zh-CN', { weekday: 'long', month: 'long', day: 'numeric' });
+}
+
+function dashboardQueueMarkup() {
+  const processing = state.projects.find(project => project.status === 'processing');
+  const draft = state.projects.find(project => project.status === 'draft');
+  const items = [];
+  if (processing) {
+    items.push(`<div class="queue-item"><span class="queue-icon">${icon('wand', 15)}</span><span class="queue-copy"><strong>${escapeHtml(processing.title)} · 处理中</strong><span>任务正在执行</span><span class="queue-progress"><i style="width:${processing.progress}%"></i></span></span><span class="queue-percent">${processing.progress}%</span></div>`);
+  }
+  if (draft) {
+    items.push(`<div class="queue-item"><span class="queue-icon" style="color:#e6966d;background:var(--orange-soft)">${icon('edit', 15)}</span><span class="queue-copy"><strong>${escapeHtml(draft.title)} · ${escapeHtml(draft.statusText)}</strong><span>等待你的确认</span></span><button class="icon-button" data-action="open-editor" data-project-id="${escapeHtml(draft.id)}" aria-label="打开作品">${icon('chevronRight', 15)}</button></div>`);
+  }
+  return items.length ? items.join('') : '<div class="queue-empty">当前没有进行中的任务。</div>';
+}
+
 function dashboardView() {
-  const processing = state.projects[0];
+  const processingCount = state.projects.filter(project => project.status === 'processing').length;
+  const completedCount = state.projects.filter(project => project.status === 'ready').length;
   return `<section class="page dashboard-page">
-    ${pageHeader('MONDAY · 09 SEPTEMBER', '早上好，林老师', '准备好把今天的灵感，变成下一条爆款了吗？', `<button class="btn btn-primary" data-action="open-create">${icon('plus', 15)} 新建作品</button>`)}
+    ${pageHeader(todayLabel(), '早上好，林老师', '准备好把今天的灵感，变成下一条爆款了吗？', `<button class="btn btn-primary" data-action="open-create">${icon('plus', 15)} 新建作品</button>`)}
     <div class="hero">
       <div class="hero-copy">
         <div class="hero-kicker"><i></i> AI 影像创作助手 · 让故事先被看见</div>
@@ -484,29 +541,25 @@ function dashboardView() {
       <div class="hero-art" aria-hidden="true"><div class="art-orbit"></div><div class="art-card left"><span class="art-card-label">A STORY IN MOTION</span></div><div class="art-card right"><span class="art-card-label">THE LAST TRAIN</span></div><span class="art-play">${icon('play', 15)}</span></div>
     </div>
     <div class="metrics">
-      <div class="metric-card"><span class="metric-icon">${icon('spark', 19)}</span><span class="metric-copy"><span class="metric-label">本月剩余生成额度</span><span class="metric-value">24 <span class="metric-note">+ 30 / 月</span></span></span></div>
-      <div class="metric-card"><span class="metric-icon orange">${icon('clock', 19)}</span><span class="metric-copy"><span class="metric-label">进行中的任务</span><span class="metric-value">01 <span class="metric-note" style="color:var(--warning)">生成中</span></span></span></div>
-      <div class="metric-card"><span class="metric-icon green">${icon('video', 19)}</span><span class="metric-copy"><span class="metric-label">本月已生成视频</span><span class="metric-value">12 <span class="metric-note">↑ 28%</span></span></span></div>
+      <div class="metric-card"><span class="metric-icon">${icon('spark', 19)}</span><span class="metric-copy"><span class="metric-label">作品总数</span><span class="metric-value">${state.projects.length} <span class="metric-note">数据库记录</span></span></span></div>
+      <div class="metric-card"><span class="metric-icon orange">${icon('clock', 19)}</span><span class="metric-copy"><span class="metric-label">进行中的任务</span><span class="metric-value">${processingCount} <span class="metric-note" style="color:var(--warning)">处理中</span></span></span></div>
+      <div class="metric-card"><span class="metric-icon green">${icon('video', 19)}</span><span class="metric-copy"><span class="metric-label">已完成作品</span><span class="metric-value">${completedCount} <span class="metric-note">可预览</span></span></span></div>
     </div>
     <div class="dashboard-grid">
       <div>
         <div class="section-head"><div><h3>最近作品</h3><p style="margin-top:4px">继续你的创作，灵感不会等待</p></div><button class="text-link" data-action="navigate" data-view="works">查看全部 ${icon('arrow', 12)}</button></div>
-        <div class="project-grid">${state.projects.map((project, index) => projectCard(project, index)).join('')}</div>
+        <div class="project-grid">${state.projects.length ? state.projects.map((project, index) => projectCard(project, index)).join('') : '<div class="empty-state">数据库中暂无作品，点击“新建作品”开始创作。</div>'}</div>
       </div>
       <div class="queue-column">
-        <div class="queue-card"><div class="section-head"><h3>生成队列</h3><span class="live-badge"><i></i>实时</span></div>
-          <div class="queue-item"><span class="queue-icon">${icon('wand', 15)}</span><span class="queue-copy"><strong>${processing.title} · 视频生成</strong><span>正在生成第 8 / 12 个片段</span><span class="queue-progress"><i style="width:${processing.progress}%"></i></span></span><span class="queue-percent">${processing.progress}%</span></div>
-          <div class="queue-item"><span class="queue-icon" style="color:#e6966d;background:var(--orange-soft)">${icon('edit', 15)}</span><span class="queue-copy"><strong>逆光之城 · 文案草稿</strong><span>等待你的确认</span></span><button class="icon-button" data-action="open-create" aria-label="继续编辑">${icon('chevronRight', 15)}</button></div>
-        </div>
-        <div class="quota-card"><div class="quota-top"><span class="quota-label">会员额度</span><span class="quota-tag">创作者会员</span></div><div class="quota-number">24 <span>/ 30 次剩余</span></div><div class="quota-bar"><i></i></div><div class="quota-bottom"><span>本月 9 月 1 日重置</span><button data-action="navigate" data-view="membership">升级套餐 ${icon('arrow', 11)}</button></div></div>
+        <div class="queue-card"><div class="section-head"><h3>生成队列</h3><span class="live-badge"><i></i>实时</span></div>${dashboardQueueMarkup()}</div>
+        <div class="quota-card"><div class="quota-top"><span class="quota-label">数据库状态</span><span class="quota-tag">本地</span></div><div class="quota-number">${state.projects.length} <span>个作品</span></div><div class="quota-bar"><i style="width:${state.projects.length ? 100 : 0}%"></i></div><div class="quota-bottom"><span>数据来自 SQLite</span><button data-action="navigate" data-view="works">管理作品 ${icon('arrow', 11)}</button></div></div>
       </div>
     </div>
   </section>`;
 }
-
 function projectCard(project, index) {
   const action = project.status === 'draft' ? 'open-create' : 'open-editor';
-  return `<article class="project-card"><div class="cover ${project.type}"><span class="cover-lines"></span><span class="cover-character"></span><span class="cover-copy"><span class="cover-kicker">${project.genre.toUpperCase()} · AI STORY</span><span class="cover-title">${project.cover}</span></span></div><div class="project-body"><div class="project-title-row"><strong>${project.title}</strong><span class="status-pill ${project.status === 'processing' ? 'processing' : project.status === 'draft' ? 'draft' : ''}">${project.statusText}</span></div><div class="project-meta"><span>${project.duration}</span><span>${project.segments}</span></div><div class="card-footer"><small>更新于 ${project.updated}</small><button class="btn btn-soft" data-action="${action}" data-project="${index}">${project.status === 'draft' ? '继续编辑' : '打开作品'} ${icon('arrow', 11)}</button></div></div></article>`;
+  return `<article class="project-card"><div class="cover ${project.type}"><span class="cover-lines"></span><span class="cover-character"></span><span class="cover-copy"><span class="cover-kicker">${project.genre.toUpperCase()} · AI STORY</span><span class="cover-title">${project.cover}</span></span></div><div class="project-body"><div class="project-title-row"><strong>${project.title}</strong><span class="status-pill ${project.status === 'processing' ? 'processing' : project.status === 'draft' ? 'draft' : ''}">${project.statusText}</span></div><div class="project-meta"><span>${project.duration}</span><span>${project.segments}</span></div><div class="card-footer"><small>更新于 ${project.updated}</small><button class="btn btn-soft" data-action="${action}" data-project-id="${escapeHtml(project.id || '')}">${project.status === 'draft' ? '继续编辑' : '打开作品'} ${icon('arrow', 11)}</button></div></div></article>`;
 }
 
 function workflowSteps(active) {
@@ -683,7 +736,7 @@ function editorView() {
 }
 
 function worksView() {
-  return `<section class="page"><div class="page-header"><div><div class="eyebrow">YOUR LIBRARY</div><h1 class="page-title">我的作品</h1><p class="page-subtitle">所有故事都在这里，随时回来继续创作。</p></div><button class="btn btn-primary" data-action="open-create">${icon('plus', 15)} 新建作品</button></div><div class="filter-row"><button class="filter-chip active">全部作品 <span style="margin-left:4px">12</span></button><button class="filter-chip">生成中</button><button class="filter-chip">已完成</button><button class="filter-chip">草稿</button><span style="flex:1"></span><button class="btn btn-ghost btn-sm">${icon('search', 13)} 搜索作品</button></div><div class="works-table"><div class="works-row header"><span>作品名称</span><span>状态</span><span>时长</span><span>最近更新</span><span>操作</span></div>${state.projects.concat([{ title: '雾中来信', genre: '言情', type: 'cover-night', cover: '雾中来信', status: 'ready', statusText: '已完成', duration: '03:44', segments: '10 个片段', updated: '8 月 28 日', progress: 100 }]).map((project, index) => `<div class="works-row"><div class="work-title-cell"><span class="work-thumb ${project.type.replace('cover-', '')}">${project.cover}</span><span class="work-title-copy"><strong>${project.title}</strong><span>${project.genre} · ${project.segments}</span></span></div><div><span class="status-pill ${project.status === 'processing' ? 'processing' : project.status === 'draft' ? 'draft' : ''}">${project.statusText}</span></div><span class="table-cell">${project.duration}</span><span class="table-cell muted">${project.updated}</span><button class="btn btn-ghost btn-sm" data-action="${project.status === 'draft' ? 'open-create' : 'open-editor'}" data-project="${index}">打开 ${icon('arrow', 11)}</button></div>`).join('')}</div></section>`;
+  return `<section class="page"><div class="page-header"><div><div class="eyebrow">YOUR LIBRARY</div><h1 class="page-title">我的作品</h1><p class="page-subtitle">所有故事都在这里，随时回来继续创作。</p></div><button class="btn btn-primary" data-action="open-create">${icon('plus', 15)} 新建作品</button></div><div class="filter-row"><button class="filter-chip active">全部作品 <span style="margin-left:4px">${state.projects.length}</span></button><button class="filter-chip">生成中</button><button class="filter-chip">已完成</button><button class="filter-chip">草稿</button><span style="flex:1"></span><button class="btn btn-ghost btn-sm">${icon('search', 13)} 搜索作品</button></div><div class="works-table"><div class="works-row header"><span>作品名称</span><span>状态</span><span>时长</span><span>最近更新</span><span>操作</span></div>${state.projects.length ? state.projects.map(project => `<div class="works-row"><div class="work-title-cell"><span class="work-thumb ${project.type.replace('cover-', '')}">${escapeHtml(project.cover)}</span><span class="work-title-copy"><strong>${escapeHtml(project.title)}</strong><span>${escapeHtml(project.genre)} · ${escapeHtml(project.segments)}</span></span></div><div><span class="status-pill ${project.status === 'processing' ? 'processing' : project.status === 'draft' ? 'draft' : ''}">${escapeHtml(project.statusText)}</span></div><span class="table-cell">${escapeHtml(project.duration)}</span><span class="table-cell muted">${escapeHtml(project.updated)}</span><button class="btn btn-ghost btn-sm" data-action="open-editor" data-project-id="${escapeHtml(project.id)}">打开 ${icon('arrow', 11)}</button></div>`).join('') : '<div class="empty-state">数据库中暂无作品，点击“新建作品”开始创作。</div>'}</div></section>`;
 }
 
 function membershipView() {
@@ -1147,14 +1200,18 @@ function handleAction(element) {
         state.storyboardIdempotencyKey = null;
         state.planningTab = 'director';
         state.submitPending = false;
-        state.segments = state.segments.map(segment => ({ ...segment, id: undefined, revision: 0 }));
+        state.title = '';
+        state.genre = '';
+        state.sourceText = '';
+        state.copyrightConfirmed = false;
+        state.segments = [];
       }
       state.view = 'create';
       state.modal = null;
       render();
       break;
     case 'open-editor':
-      openEditor();
+      void openProject(element.dataset.projectId || state.activeProjectId);
       break;
     case 'select-genre':
       state.genre = element.dataset.genre;
@@ -1443,6 +1500,15 @@ window.addEventListener('pagehide', () => {
   void flushSegmentDrafts();
 });
 
-render();
-void restoreSession();
+async function initializeApp() {
+  try {
+    await loadProjects();
+  } catch (error) {
+    showToast(`无法加载作品列表：${error.message}`, 'error');
+  }
+  render();
+  await restoreSession();
+}
+
+void initializeApp();
 

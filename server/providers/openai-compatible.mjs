@@ -1,5 +1,5 @@
 import { cleanGeneratedText } from '../safety.mjs';
-import { optionalPrompt, requiredPrompt, renderPrompt } from '../prompt-config.mjs';
+import { requiredPrompt, renderPrompt } from '../prompt-config.mjs';
 
 export const PROMPT_VERSION = 'rewrite-v1';
 export const SHOT_PROMPT_VERSION = 'shot-prompt-v1';
@@ -19,7 +19,7 @@ export class ProviderError extends Error {
 
 export function createTextProvider() {
   const provider = String(process.env.LLM_PROVIDER || 'deepseek').toLowerCase();
-  if (provider === 'mock') return new MockTextProvider();
+  if (provider === 'mock') throw new Error('Please configure a real OpenAI-compatible LLM provider');
   return new OpenAICompatibleProvider({
     provider,
     baseUrl: process.env.LLM_BASE_URL || 'https://api.deepseek.com/v1',
@@ -220,147 +220,6 @@ export class OpenAICompatibleProvider {
       clearTimeout(timer);
     }
   }
-}
-
-export class MockTextProvider {
-  constructor() {
-    this.provider = 'mock';
-    this.model = 'mock-rewrite-v1';
-  }
-
-  async rewrite({ sourceText }) {
-    const paragraphs = sourceText.split(/\n{2,}/).map(item => item.trim()).filter(Boolean);
-    // Mock provider 应完整保留输入段落，不人为截断分段数量。
-    const pieces = paragraphs.length ? paragraphs : [sourceText];
-    const segments = pieces.map((text, index) => ({
-      sequence: index + 1,
-      title: `故事片段 ${index + 1}`,
-      scriptText: text.length > 180 ? `${text.slice(0, 178)}…` : text,
-      summary: text.slice(0, 45),
-    }));
-    return {
-      cleanedText: sourceText.trim(),
-      segments,
-      provider: this.provider,
-      model: this.model,
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    };
-  }
-
-  async generateShotPrompts({ count = 1, scriptText, summary }) {
-    const template = optionalPrompt('MOCK_SHOT_PROMPT_TEMPLATE');
-    return { shots: Array.from({ length: count }, (_, index) => ({
-      sequence: index + 1,
-      promptZh: renderPrompt(template, { sequence: index + 1, description: summary || scriptText.slice(0, 40) }) || String(summary || scriptText.slice(0, 40)),
-    })), provider: this.provider, model: this.model, promptVersion: SHOT_PROMPT_VERSION };
-  }
-
-  async generateVisualBible({ segments, genre, visualStyle }) {
-    return { characters: [], scenes: segments.map((item, index) => ({ name: item.title || `场景${index + 1}`, description: item.summary || item.scriptText.slice(0, 60) })), style: `${genre}，${visualStyle}，人物与服装跨镜头保持一致` };
-  }
-
-  async generateDirectorAnalysis({ segments }) {
-    return {
-      segments: segments.map(segment => {
-        const count = Math.max(1, Number(segment.targetShotCount || 1));
-        return {
-          segmentId: segment.id,
-          beats: Array.from({ length: count }, (_, index) => ({
-            beatId: `${segment.id}-beat-${index + 1}`,
-            plot: `${segment.summary || segment.scriptText.slice(0, 80)}（节拍 ${index + 1}）`,
-            emotion: inferEmotion(segment.scriptText),
-            emotionIntensity: Math.min(1, 0.55 + index * 0.05),
-            action: inferAction(segment.scriptText),
-            actionSpeed: /跑|追|冲|逃/.test(segment.scriptText) ? '快' : '慢',
-            sceneType: inferScene(segment.scriptText),
-            narrativePurpose: index === count - 1 ? '突出关键信息并推动下一节拍' : '推进剧情并积累情绪',
-            subjectCount: 1,
-            continuityConstraints: [],
-          })),
-        };
-      }),
-      provider: this.provider,
-      model: this.model,
-      promptVersion: DIRECTOR_PROMPT_VERSION,
-    };
-  }
-
-  async generateShotSelection({ directorAnalysis, retrievalContexts }) {
-    return {
-      segments: directorAnalysis.segments.map(segment => ({
-        segmentId: segment.segmentId,
-        selections: segment.beats.map((beat, index) => {
-          const evidence = retrievalContexts.find(item => item.beatId === beat.beatId)?.evidence || [];
-          return {
-            beatId: beat.beatId,
-            shotSize: /线索|发现|信息/.test(beat.narrativePurpose) ? '特写' : '中景',
-            angle: /恐惧|无助|压迫/.test(beat.emotion) ? '轻微俯拍' : '平视',
-            movement: beat.actionSpeed === '快' ? '稳定跟拍' : '缓慢推进',
-            focalLengthMm: /特写/.test(beat.narrativePurpose) ? 50 : 35,
-            composition: /恐惧|不安/.test(beat.emotion) ? '负空间' : '三分法',
-            durationMs: 5000,
-            selectionReason: '根据情绪强度、叙事目的和知识库约束选择单一明确的镜头语言',
-            evidenceIds: evidence.slice(0, 3).map(item => item.id),
-            transitionToNext: index === segment.beats.length - 1 ? null : { type: 'cut', durationMs: 0, motivation: '保持叙事连续' },
-          };
-        }),
-      })),
-      provider: this.provider,
-      model: this.model,
-      promptVersion: CAMERA_PROMPT_VERSION,
-    };
-  }
-
-  async generateStoryboard({ directorAnalysis, shotSelection }) {
-    return {
-      segments: shotSelection.segments.map(segment => {
-        const directorSegment = directorAnalysis.segments.find(item => item.segmentId === segment.segmentId);
-        return {
-          segmentId: segment.segmentId,
-          shots: segment.selections.map((selection, index) => {
-            const beat = directorSegment?.beats.find(item => item.beatId === selection.beatId) || {};
-            return {
-              sequence: index + 1,
-              beatId: selection.beatId,
-              plot: beat.plot || '',
-              shotSize: selection.shotSize,
-              movement: selection.movement,
-              angle: selection.angle,
-              focalLengthMm: selection.focalLengthMm,
-              composition: selection.composition,
-              purpose: beat.narrativePurpose || '',
-              durationMs: selection.durationMs,
-              selectionReason: selection.selectionReason,
-              evidenceIds: selection.evidenceIds,
-              transitionToNext: selection.transitionToNext,
-            };
-          }),
-        };
-      }),
-      provider: this.provider,
-      model: this.model,
-      promptVersion: STORYBOARD_PROMPT_VERSION,
-    };
-  }
-}
-
-function inferEmotion(text) {
-  if (/怕|恐|惊|诡|血|死/.test(text)) return '恐惧';
-  if (/怒|恨|吼/.test(text)) return '愤怒';
-  if (/哭|泪|悲|失去/.test(text)) return '悲伤';
-  return '不安';
-}
-
-function inferAction(text) {
-  const match = String(text || '').match(/[^。！？]*(?:发现|拿起|看见|走|跑|追|转身|打开|进入)[^。！？]*/);
-  return match?.[0]?.slice(0, 60) || '人物观察环境并作出反应';
-}
-
-function inferScene(text) {
-  if (/地铁|隧道|站台/.test(text)) return '隧道';
-  if (/房|门|室内/.test(text)) return '室内';
-  if (/街|路/.test(text)) return '街道';
-  return '新场景';
 }
 
 export function validateRewriteResult(result) {

@@ -4,38 +4,73 @@ import test, { afterEach, beforeEach } from 'node:test';
 import { openDatabase, closeDatabase } from '../server/db.mjs';
 import { createApi } from '../server/api.mjs';
 import { RewriteTaskRunner, waitForTask } from '../server/rewrite-task.mjs';
-import { MockTextProvider } from '../server/providers/openai-compatible.mjs';
-import { MockMediaProvider } from '../server/providers/media.mjs';
+import { JsonSubtitleProvider } from '../server/providers/subtitles.mjs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { MediaTaskRunner, waitForGenerationTask } from '../server/media-task.mjs';
-import { ExportTaskRunner, waitForExportTask } from '../server/export-task.mjs';
 import { KnowledgeRetriever, seedKnowledgeDirectory } from '../server/knowledge-retriever.mjs';
 import { StoryboardTaskRunner, waitForStoryboardTask } from '../server/storyboard-task.mjs';
-import { resolve } from 'node:path';
 
 let db;
 let runner;
 let mediaRunner;
-let exportRunner;
 let storyboardRunner;
 let textProvider;
 let server;
 let baseUrl;
+let mediaRoot;
 
 const source = length => {
   const paragraph = '沈砚在地铁站醒来。';
   return paragraph.repeat(Math.ceil(length / Array.from(paragraph).length)).slice(0, length);
 };
 
+
+class FixtureTextProvider {
+  constructor() { this.provider = 'fixture'; this.model = 'fixture-text-v1'; }
+  async rewrite({ sourceText }) {
+    const paragraphs = sourceText.split(/\n{2,}/).map(item => item.trim()).filter(Boolean);
+    const pieces = paragraphs.length ? paragraphs : [sourceText];
+    return { cleanedText: sourceText.trim(), segments: pieces.map((text, index) => ({ sequence: index + 1, title: `Segment ${index + 1}`, scriptText: text.length > 180 ? `${text.slice(0, 178)}...` : text, summary: text.slice(0, 45) })), provider: this.provider, model: this.model, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+  }
+  async generateShotPrompts({ count = 1, scriptText, summary }) {
+    return { shots: Array.from({ length: count }, (_, index) => ({ sequence: index + 1, promptZh: `Shot ${index + 1}: ${summary || scriptText.slice(0, 40)}, continuous subject, cinematic composition` })), provider: this.provider, model: this.model, promptVersion: 'fixture-shot-v1' };
+  }
+  async generateVisualBible({ segments, genre, visualStyle }) {
+    return { characters: [], scenes: segments.map((item, index) => ({ name: item.title || `Scene ${index + 1}`, description: item.summary || item.scriptText.slice(0, 60) })), style: `${genre}, ${visualStyle}, consistent character and wardrobe` };
+  }
+  async generateDirectorAnalysis({ segments }) {
+    return { segments: segments.map(segment => { const count = Math.max(1, Number(segment.targetShotCount || 1)); return { segmentId: segment.id, beats: Array.from({ length: count }, (_, index) => ({ beatId: `${segment.id}-beat-${index + 1}`, plot: `${segment.summary || segment.scriptText.slice(0, 80)} (beat ${index + 1})`, emotion: 'unease', emotionIntensity: Math.min(1, 0.55 + index * 0.05), action: 'the subject observes the environment', actionSpeed: 'slow', sceneType: 'station', narrativePurpose: index === count - 1 ? 'advance the story' : 'build tension', subjectCount: 1, continuityConstraints: [] })) }; }), provider: this.provider, model: this.model, promptVersion: 'fixture-director-v1' };
+  }
+  async generateShotSelection({ directorAnalysis, retrievalContexts }) {
+    return { segments: directorAnalysis.segments.map(segment => ({ segmentId: segment.segmentId, selections: segment.beats.map((beat, index) => { const evidence = retrievalContexts.find(item => item.beatId === beat.beatId)?.evidence || []; return { beatId: beat.beatId, shotSize: 'medium shot', angle: 'eye level', movement: 'slow push-in', focalLengthMm: 35, composition: 'rule of thirds', durationMs: 5000, selectionReason: 'fixture camera selection', evidenceIds: evidence.slice(0, 3).map(item => item.id), transitionToNext: index === segment.beats.length - 1 ? null : { type: 'cut', durationMs: 0, motivation: 'continuity' } }; }) })), provider: this.provider, model: this.model, promptVersion: 'fixture-camera-v1' };
+  }
+  async generateStoryboard({ directorAnalysis, shotSelection }) {
+    return { segments: shotSelection.segments.map(segment => { const directorSegment = directorAnalysis.segments.find(item => item.segmentId === segment.segmentId); return { segmentId: segment.segmentId, shots: segment.selections.map((selection, index) => { const beat = directorSegment?.beats.find(item => item.beatId === selection.beatId) || {}; return { sequence: index + 1, beatId: selection.beatId, plot: beat.plot || '', shotSize: selection.shotSize, movement: selection.movement, angle: selection.angle, focalLengthMm: selection.focalLengthMm, composition: selection.composition, purpose: beat.narrativePurpose || '', durationMs: selection.durationMs, selectionReason: selection.selectionReason, evidenceIds: selection.evidenceIds, transitionToNext: selection.transitionToNext }; }) }; }), provider: this.provider, model: this.model, promptVersion: 'fixture-storyboard-v1' };
+  }
+}
+
+class FixtureMediaProvider {
+  constructor() { this.provider = 'fixture'; this.model = 'fixture-media-v1'; }
+  async generateVideo({ segmentVersion, shot = null }) {
+    const objectKey = shot ? `fixture/video/${segmentVersion.id}/shots/${shot.id}.mp4` : `fixture/video/${segmentVersion.id}.mp4`;
+    const durationMs = Number(shot?.duration_ms || segmentVersion.duration_ms || 1);
+    return { objectKey, durationMs, sizeBytes: Math.max(1024, durationMs), metadata: { fixture: true, prompt: shot?.prompt_zh || segmentVersion.prompt_text, shotId: shot?.id || null } };
+  }
+}
+
 beforeEach(async () => {
   db = await openDatabase(':memory:');
   await seedKnowledgeDirectory(db, resolve('knowledge'));
-  textProvider = new MockTextProvider();
+  textProvider = new FixtureTextProvider();
   runner = new RewriteTaskRunner({ db, provider: textProvider, logger: { error() {} } });
-  const mediaProvider = new MockMediaProvider({ stepDelayMs: 0 });
-  mediaRunner = new MediaTaskRunner({ db, provider: mediaProvider, textProvider, logger: { error() {} } });
-  exportRunner = new ExportTaskRunner({ db, logger: { error() {} }, stepDelayMs: 0 });
+  mediaRoot = await mkdtemp(join(tmpdir(), 'wenying-fixture-media-'));
+  const mediaProvider = new FixtureMediaProvider();
+  const subtitleProvider = new JsonSubtitleProvider({ mediaRoot });
+  mediaRunner = new MediaTaskRunner({ db, provider: mediaProvider, subtitleProvider, textProvider, requireAudio: false, logger: { error() {} } });
   storyboardRunner = new StoryboardTaskRunner({ db, provider: textProvider, retriever: new KnowledgeRetriever({ db }), logger: { error() {} } });
-  const api = createApi({ db, runner, provider: textProvider, mediaRunner, mediaProvider, exportRunner, storyboardRunner });
+  const api = createApi({ db, runner, provider: textProvider, mediaRunner, mediaProvider, storyboardRunner });
   server = http.createServer((req, res) => api(req, res, new URL(req.url, 'http://localhost').pathname));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}/api/v1`;
@@ -44,6 +79,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await new Promise(resolve => server.close(resolve));
   closeDatabase(db);
+  await rm(mediaRoot, { recursive: true, force: true });
 });
 
 async function request(path, options = {}) {
@@ -305,7 +341,7 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   const generated = await request(`/generation-tasks/${task.id}`);
   assert.equal(generated.body.project.status, 'ready');
   assert.equal(generated.body.segments[0].mediaStatus, 'ready');
-  assert.equal(generated.body.segments[0].media.length, 3);
+  assert.equal(generated.body.segments[0].media.length, 2);
   assert.ok(generated.body.segments[0].shots.length >= 1);
   assert.ok(generated.body.segments[0].shots.every(shot => shot.promptZh && shot.status === 'ready'));
   const oldVersionId = generated.body.segments[0].activeVersionId;
@@ -329,15 +365,5 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   assert.equal(afterRegenerate.body.segments[0].mediaStatus, 'ready');
   assert.equal(afterRegenerate.body.segments[0].shots[0].promptZh, '用户修改后的镜头提示词');
 
-  const exportStart = await request(`/projects/${project.id}/export-tasks`, {
-    method: 'POST',
-    headers: { 'idempotency-key': `export-${project.id}` },
-    body: JSON.stringify({ ratio: '9:16', resolution: '1080p' }),
-  });
-  assert.equal(exportStart.response.status, 202);
-  const exportTask = await waitForExportTask(exportRunner, exportStart.body.task.id);
-  assert.equal(exportTask.status, 'succeeded');
-  const exports = await request(`/projects/${project.id}/exports`);
-  assert.equal(exports.body.exports[0].status, 'succeeded');
-  assert.equal(exports.body.exports[0].ratio, '9:16');
+
 });

@@ -36,7 +36,7 @@ export class DoubaoTtsProvider {
 }
 
 export function createTtsProvider({ mediaRoot } = {}) {
-  if (String(process.env.TTS_PROVIDER || 'mock').toLowerCase() === 'doubao') {
+  if (String(process.env.TTS_PROVIDER || '').toLowerCase() === 'doubao') {
     return new DoubaoTtsProvider({ baseUrl: process.env.DOUBAO_TTS_URL || 'https://openspeech.bytedance.com/api/v1/tts', appId: process.env.DOUBAO_TTS_APP_ID, accessToken: process.env.DOUBAO_TTS_ACCESS_TOKEN, resourceId: process.env.DOUBAO_TTS_RESOURCE_ID, mediaRoot, ffprobePath: process.env.FFPROBE_PATH });
   }
   return null;

@@ -5,16 +5,16 @@
 需要 Node.js 24 或更高版本。
 
 1. 复制 `.env.example` 为 `.env`。
-2. 设置 `LLM_API_KEY`，默认使用 DeepSeek；本地无密钥演示可显式设置 `LLM_PROVIDER=mock`。
+2. 设置 `LLM_API_KEY`，默认使用 DeepSeek；本地无密钥演示可显式设置 `LLM_PROVIDER=deepseek`。
 3. 执行 `pnpm dev`，打开 `http://127.0.0.1:4173`。
 
 SQLite 数据默认写入 `data/wenying.sqlite`。数据目录和密钥文件不会提交到仓库。
 
-视频生成默认使用 `MEDIA_PROVIDER=mock`，用于本地完整验证任务、片段版本、素材状态和导出状态；接入真实 TTS、文生视频和 FFmpeg 服务时替换对应 Provider/Runner。
+视频生成默认使用 `MEDIA_PROVIDER=comfyui`，用于本地完整验证任务、片段版本、素材状态和导出状态；接入真实 TTS、文生视频和 FFmpeg 服务时替换对应 Provider/Runner。
 
-三层前期策划流水线：确认文案并选择视觉配置后，通过异步任务依次完成“导演分析 → RAG 知识检索 → 镜头选择 → 结构化分镜表”。分镜确认后，视频模型才会按镜头生成素材，再由 Composer 合成为带口播音轨的片段视频。内置知识库位于 `knowledge/`，覆盖镜头语言、构图、运镜焦段、转场和模型能力。默认 `COMPOSER_PROVIDER=mock`；配置 `COMPOSER_PROVIDER=ffmpeg` 和 `FFMPEG_PATH` 可启用本地 FFmpeg 合成及 `dissolve/fade` 转场。豆包 TTS 通过 `TTS_PROVIDER=doubao` 及 `DOUBAO_TTS_*` 环境变量启用。
+三层前期策划流水线：确认文案并选择视觉配置后，通过异步任务依次完成“导演分析 → RAG 知识检索 → 镜头选择 → 结构化分镜表”。分镜确认后，视频模型才会按镜头生成素材，再由 Composer 合成为带口播音轨的片段视频。内置知识库位于 `knowledge/`，覆盖镜头语言、构图、运镜焦段、转场和模型能力。默认 `COMPOSER_PROVIDER=ffmpeg`；配置 `COMPOSER_PROVIDER=ffmpeg` 和 `FFMPEG_PATH` 可启用本地 FFmpeg 合成及 `dissolve/fade` 转场。豆包 TTS 通过 `TTS_PROVIDER=doubao` 及 `DOUBAO_TTS_*` 环境变量启用。
 
-AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LLM_*_USER_PROMPT_TEMPLATE` 控制传给大语言模型的上下文模板，`VIDEO_*_PROMPT_TEMPLATE` 控制视频提示词模板，`COMFYUI_NEGATIVE_PROMPT` 控制 ComfyUI 负面提示词，`MOCK_SHOT_PROMPT_TEMPLATE` 仅控制 Mock 分镜数据。模板支持 `{genre}`、`{sourceText}` 等占位符，换行使用 `\\n` 表示；修改后需要重启服务。
+AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LLM_*_USER_PROMPT_TEMPLATE` 控制传给大语言模型的上下文模板，`VIDEO_*_PROMPT_TEMPLATE` 控制视频提示词模板，`COMFYUI_NEGATIVE_PROMPT` 控制 ComfyUI 负面提示词。模板支持 `{genre}`、`{sourceText}` 等占位符，换行使用 `\\n` 表示；修改后需要重启服务。
 
 ## 文案接口
 
@@ -50,7 +50,7 @@ AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LL
 - `GET /export-tasks/:id` 查询导出进度
 - `GET /projects/:id/exports` 查看导出记录
 
-策划任务、视频任务和导出任务均采用 HTTP 轮询，服务重启后会恢复 `pending/running` 任务。视频任务要求当前策划版本已经确认。Mock 模式只生成可追踪的素材记录和对象 Key，不会调用第三方 API 或产生真实媒体文件。
+Task polling resumes pending/running work after restart. Video generation requires a confirmed storyboard; if a real provider is not configured, the task fails explicitly instead of creating placeholder media.
 
 详细架构、迁移和后续计划参见 [三层分镜与RAG架构实施记录.md](./三层分镜与RAG架构实施记录.md)。
 
