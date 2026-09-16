@@ -1,0 +1,47 @@
+{
+  "id": "movement-and-lens",
+  "name": "运镜与焦段库",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "movement-slow-push-001",
+      "title": "缓慢推进揭示异常",
+      "content": "从稳定构图缓慢推进主体，可逐步压缩空间并引导观众发现人物表情或关键线索。",
+      "tags": { "emotions": ["不安", "恐惧", "怀疑"], "purposes": ["揭示线索", "积累压力"], "movements": ["缓慢推进"], "focalLengths": [50] },
+      "constraints": { "minDurationMs": 3000 },
+      "priority": 0.95
+    },
+    {
+      "id": "movement-follow-002",
+      "title": "跟拍保持行动连续",
+      "content": "人物持续移动时使用稳定跟拍，保持动作方向和空间连续，不要同时叠加复杂变焦。",
+      "tags": { "actions": ["行走", "奔跑", "逃离"], "purposes": ["动作连续", "沉浸体验"], "movements": ["跟拍"], "focalLengths": [35] },
+      "constraints": { "minDurationMs": 2500 },
+      "priority": 0.9
+    },
+    {
+      "id": "movement-handheld-003",
+      "title": "克制手持表现失控",
+      "content": "高强度追逐或精神失控可使用轻微手持，但幅度应受控，避免视频模型产生形变和闪烁。",
+      "tags": { "emotions": ["慌乱", "失控"], "actions": ["追逐", "逃离"], "movements": ["轻微手持"], "focalLengths": [28, 35] },
+      "constraints": { "minDurationMs": 2000 },
+      "priority": 0.75
+    },
+    {
+      "id": "lens-wide-space-004",
+      "title": "广角强调环境压力",
+      "content": "24至35毫米广角适合强调环境尺度和人物与空间的关系，近距离使用时需避免面部位于画面边缘。",
+      "tags": { "purposes": ["强调环境", "空间压迫"], "shotSizes": ["全景", "中景"], "focalLengths": [24, 28, 35] },
+      "constraints": {},
+      "priority": 0.82
+    },
+    {
+      "id": "lens-portrait-005",
+      "title": "中长焦隔离人物",
+      "content": "50至85毫米适合人物近景和情绪反应，可压缩背景并减少无关环境干扰。",
+      "tags": { "emotions": ["恐惧", "悲伤", "犹豫"], "shotSizes": ["近景", "特写"], "focalLengths": [50, 85] },
+      "constraints": { "maxSubjects": 2 },
+      "priority": 0.88
+    }
+  ]
+}

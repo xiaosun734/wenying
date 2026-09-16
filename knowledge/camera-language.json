@@ -1,0 +1,47 @@
+{
+  "id": "camera-language",
+  "name": "镜头语言库",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "camera-establishing-001",
+      "title": "环境建立镜头",
+      "content": "场景首次出现时使用全景或远景交代空间、人物位置和环境威胁，随后再进入人物近景。",
+      "tags": { "purposes": ["建立空间", "交代环境"], "shotSizes": ["全景", "远景"], "sceneTypes": ["新场景", "空旷空间"] },
+      "constraints": { "minDurationMs": 2500 },
+      "priority": 0.9
+    },
+    {
+      "id": "camera-emotion-close-002",
+      "title": "情绪近景",
+      "content": "人物情绪发生明确转折时使用近景或特写，让观众读取眼神、呼吸和细微表情。",
+      "tags": { "emotions": ["恐惧", "震惊", "悲伤", "犹豫"], "purposes": ["情绪转折", "强调反应"], "shotSizes": ["近景", "特写"] },
+      "constraints": { "maxSubjects": 2 },
+      "priority": 0.95
+    },
+    {
+      "id": "camera-clue-insert-003",
+      "title": "关键线索插入镜头",
+      "content": "叙事依赖物件、文字或局部动作时使用物件特写，确保线索在画面中清晰且停留足够时间。",
+      "tags": { "purposes": ["揭示线索", "信息强调"], "shotSizes": ["特写"], "actions": ["查看物件", "发现证据"] },
+      "constraints": { "minDurationMs": 1800 },
+      "priority": 1
+    },
+    {
+      "id": "camera-power-angle-004",
+      "title": "权力关系角度",
+      "content": "仰拍强化主体的控制与威胁，俯拍削弱人物并突出无助；没有权力表达时优先平视。",
+      "tags": { "emotions": ["压迫", "无助", "威胁"], "purposes": ["权力变化", "建立威胁"], "angles": ["仰拍", "俯拍", "平视"] },
+      "constraints": {},
+      "priority": 0.85
+    },
+    {
+      "id": "camera-dialogue-relation-005",
+      "title": "人物关系镜头",
+      "content": "两人关系和空间方向需要明确时，先用双人中景建立轴线，再使用过肩或单人近景。",
+      "tags": { "purposes": ["建立关系", "保持方位"], "shotSizes": ["中景"], "sceneTypes": ["双人场景"] },
+      "constraints": { "minSubjects": 2 },
+      "priority": 0.8
+    }
+  ]
+}

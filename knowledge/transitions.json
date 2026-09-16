@@ -1,0 +1,47 @@
+{
+  "id": "transitions",
+  "name": "剪辑与转场库",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "transition-cut-001",
+      "title": "叙事优先硬切",
+      "content": "连续时间和空间内优先硬切。动作、视线或构图已经提供连接时，不额外添加装饰性转场。",
+      "tags": { "transitions": ["cut"], "purposes": ["保持节奏", "连续叙事"] },
+      "constraints": {},
+      "priority": 1
+    },
+    {
+      "id": "transition-match-action-002",
+      "title": "动作匹配剪辑",
+      "content": "前镜头动作尚未完成时切到下一景别延续同一动作，可隐藏切点并强化速度。",
+      "tags": { "transitions": ["match_cut"], "actions": ["转身", "抬手", "奔跑"], "purposes": ["动作连续"] },
+      "constraints": {},
+      "priority": 0.92
+    },
+    {
+      "id": "transition-visual-match-003",
+      "title": "图形或光线匹配",
+      "content": "当前后镜头具有相似形状、颜色或亮度中心时使用匹配剪辑，实现自然的场景或时间跳转。",
+      "tags": { "transitions": ["match_cut"], "purposes": ["场景转换", "时间跳转"], "emotions": ["联想", "揭示"] },
+      "constraints": {},
+      "priority": 0.85
+    },
+    {
+      "id": "transition-dissolve-004",
+      "title": "叠化表达时间变化",
+      "content": "叠化适合记忆、梦境或明确的时间流逝，不应用于快速动作和普通连续对话。",
+      "tags": { "transitions": ["dissolve"], "sceneTypes": ["回忆", "梦境"], "purposes": ["时间流逝", "进入回忆"] },
+      "constraints": { "minDurationMs": 4000 },
+      "priority": 0.75
+    },
+    {
+      "id": "transition-fade-005",
+      "title": "淡入淡出结束段落",
+      "content": "淡出通常表示一个叙事段落结束或较长时间间隔，不应在同一动作内部使用。",
+      "tags": { "transitions": ["fade"], "purposes": ["段落结束", "较长间隔"] },
+      "constraints": { "minDurationMs": 4000 },
+      "priority": 0.7
+    }
+  ]
+}

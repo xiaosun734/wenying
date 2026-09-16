@@ -1,0 +1,31 @@
+{
+  "id": "model-capabilities",
+  "name": "视频模型能力库",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "model-single-action-001",
+      "title": "单镜头单主体单动作",
+      "content": "每个生成镜头只安排一个主要主体、一个连续动作和一种主要运镜，避免蒙太奇、跨场景和多阶段动作。",
+      "tags": { "models": ["comfyui-workflow", "text-to-video"], "purposes": ["生成稳定"] },
+      "constraints": { "maxDurationMs": 6000 },
+      "priority": 1
+    },
+    {
+      "id": "model-camera-restraint-002",
+      "title": "限制复合运镜",
+      "content": "不要在同一短镜头中同时使用推拉、环绕、快速摇镜和变焦；优先单一、缓慢、可描述的运动。",
+      "tags": { "models": ["comfyui-workflow"], "purposes": ["减少形变", "生成稳定"] },
+      "constraints": {},
+      "priority": 0.95
+    },
+    {
+      "id": "model-text-readability-003",
+      "title": "避免依赖生成文字",
+      "content": "视频模型不适合生成可读长文字。叙事线索优先使用物件、颜色或动作表达，必须出现的文字交给后期字幕或图层。",
+      "tags": { "models": ["comfyui-workflow"], "purposes": ["生成稳定", "信息表达"] },
+      "constraints": {},
+      "priority": 0.9
+    }
+  ]
+}

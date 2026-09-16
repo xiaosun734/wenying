@@ -1,0 +1,47 @@
+{
+  "id": "composition",
+  "name": "构图技巧库",
+  "version": "1.0.0",
+  "items": [
+    {
+      "id": "composition-negative-space-001",
+      "title": "负空间制造不安",
+      "content": "让人物偏离中心并保留大面积空白，可暗示未知威胁将从空白方向进入。",
+      "tags": { "emotions": ["不安", "孤独", "恐惧"], "purposes": ["制造悬念", "暗示威胁"], "compositions": ["负空间"] },
+      "constraints": { "maxSubjects": 2 },
+      "priority": 0.95
+    },
+    {
+      "id": "composition-frame-within-frame-002",
+      "title": "框中框限制人物",
+      "content": "利用门、窗、隧道或前景遮挡形成框中框，表达人物被监视、围困或无法逃离。",
+      "tags": { "emotions": ["压迫", "困顿", "恐惧"], "sceneTypes": ["室内", "隧道", "门窗"], "compositions": ["框中框"] },
+      "constraints": {},
+      "priority": 0.9
+    },
+    {
+      "id": "composition-symmetry-003",
+      "title": "对称构图的秩序与异样",
+      "content": "对称构图先建立稳定秩序，再以单个不对称元素制造异常，适合仪式感或超现实场景。",
+      "tags": { "emotions": ["诡异", "肃穆"], "purposes": ["建立秩序", "突出异常"], "compositions": ["对称构图"] },
+      "constraints": { "minDurationMs": 2500 },
+      "priority": 0.82
+    },
+    {
+      "id": "composition-leading-lines-004",
+      "title": "引导线强化方向",
+      "content": "道路、走廊、灯光和建筑边缘可形成引导线，把注意力导向人物、出口或威胁来源。",
+      "tags": { "sceneTypes": ["走廊", "街道", "隧道"], "purposes": ["强调方向", "引导视线"], "compositions": ["引导线"] },
+      "constraints": {},
+      "priority": 0.8
+    },
+    {
+      "id": "composition-depth-005",
+      "title": "前中后景分层",
+      "content": "利用前景遮挡、中景主体和后景信息建立纵深，可在同一镜头中同时交代人物和潜在危险。",
+      "tags": { "purposes": ["空间叙事", "埋伏信息"], "compositions": ["纵深构图"], "sceneTypes": ["复杂空间"] },
+      "constraints": { "minDurationMs": 3000 },
+      "priority": 0.85
+    }
+  ]
+}
