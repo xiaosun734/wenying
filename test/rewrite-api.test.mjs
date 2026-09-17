@@ -38,7 +38,7 @@ class FixtureTextProvider {
     return { shots: Array.from({ length: count }, (_, index) => ({ sequence: index + 1, promptZh: `Shot ${index + 1}: ${summary || scriptText.slice(0, 40)}, continuous subject, cinematic composition` })), provider: this.provider, model: this.model, promptVersion: 'fixture-shot-v1' };
   }
   async generateVisualBible({ segments, genre, visualStyle }) {
-    return { characters: [], scenes: segments.map((item, index) => ({ name: item.title || `Scene ${index + 1}`, description: item.summary || item.scriptText.slice(0, 60) })), style: `${genre}, ${visualStyle}, consistent character and wardrobe` };
+    return { characters: [{ name: '沈砚', appearance: '短黑发，清瘦脸型', costume: '黑色正式服装' }], scenes: segments.map((item, index) => ({ name: item.title || `Scene ${index + 1}`, description: item.summary || item.scriptText.slice(0, 60) })), style: `${genre}, ${visualStyle}, consistent character and wardrobe` };
   }
   async generateDirectorAnalysis({ segments }) {
     return { segments: segments.map(segment => { const count = Math.max(1, Number(segment.targetShotCount || 1)); return { segmentId: segment.id, beats: Array.from({ length: count }, (_, index) => ({ beatId: `${segment.id}-beat-${index + 1}`, plot: `${segment.summary || segment.scriptText.slice(0, 80)} (beat ${index + 1})`, emotion: 'unease', emotionIntensity: Math.min(1, 0.55 + index * 0.05), action: 'the subject observes the environment', actionSpeed: 'slow', sceneType: 'station', narrativePurpose: index === count - 1 ? 'advance the story' : 'build tension', subjectCount: 1, continuityConstraints: [] })) }; }), provider: this.provider, model: this.model, promptVersion: 'fixture-director-v1' };
@@ -52,14 +52,21 @@ class FixtureTextProvider {
 }
 
 class FixtureMediaProvider {
-  constructor() { this.provider = 'fixture'; this.model = 'fixture-media-v1'; }
-  async generateVideo({ segmentVersion, shot = null }) {
+  constructor() { this.provider = 'fixture'; this.model = 'fixture-media-v1'; this.videoCalls = []; }
+  async generateImage({ prompt, seed, filenamePrefix = 'image' }) {
+    return {
+      objectKey: `fixture/images/${filenamePrefix}-${seed ?? 1}.png`, durationMs: 0, sizeBytes: 2048,
+      metadata: { fixture: true, prompt, seed: seed ?? 1, sha256: `fixture-${filenamePrefix}` },
+    };
+  }
+  async generateVideo(input) {
+    this.videoCalls.push(input);
+    const { segmentVersion, shot = null } = input;
     const objectKey = shot ? `fixture/video/${segmentVersion.id}/shots/${shot.id}.mp4` : `fixture/video/${segmentVersion.id}.mp4`;
     const durationMs = Number(shot?.duration_ms || segmentVersion.duration_ms || 1);
     return { objectKey, durationMs, sizeBytes: Math.max(1024, durationMs), metadata: { fixture: true, prompt: shot?.prompt_zh || segmentVersion.prompt_text, shotId: shot?.id || null } };
   }
 }
-
 beforeEach(async () => {
   db = await openDatabase(':memory:');
   await seedKnowledgeDirectory(db, resolve('knowledge'));
@@ -284,6 +291,76 @@ test('saves drafts with optimistic revisions and confirms an immutable snapshot'
   assert.equal(immutableUpdate.body.error.code, 'SCRIPT_VERSION_IMMUTABLE');
 });
 
+test('locks references, generates and confirms keyframes, then gates I2V generation', async () => {
+  const { project } = await createReadyScript();
+  await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
+  const storyboard = await request(`/projects/${project.id}/storyboard-tasks`, { method: 'POST' });
+  const storyboardTask = await waitForStoryboardTask(storyboardRunner, storyboard.body.task.id);
+  assert.equal(storyboardTask.status, 'succeeded');
+
+  let state = (await request(`/projects/${project.id}`)).body;
+  const character = state.visualBible.content.characters[0];
+  assert.ok(character?.entityId);
+  const referenceTaskResponse = await request(`/projects/${project.id}/reference-assets`, {
+    method: 'POST', headers: { 'idempotency-key': `reference-${project.id}` },
+    body: JSON.stringify({ entityKind: 'character', entityId: character.entityId, count: 2, seed: 101 }),
+  });
+  assert.equal(referenceTaskResponse.response.status, 202);
+  const referenceTask = await waitForGenerationTask(mediaRunner, referenceTaskResponse.body.task.id);
+  assert.equal(referenceTask.status, 'succeeded');
+  state = (await request(`/projects/${project.id}`)).body;
+  assert.equal(state.referenceAssets.length, 2);
+  const selectedReference = state.referenceAssets.find(asset => asset.metadata?.variantId === 'front');
+  const referenceSelection = await request(`/media-assets/${selectedReference.id}/select`, { method: 'POST', body: '{}' });
+  assert.equal(referenceSelection.response.status, 200);
+  assert.equal(referenceSelection.body.visualBible.content.characters[0].selectedReferenceAssetId, selectedReference.id);
+
+  const confirmPlan = await request(`/storyboard-plans/${state.storyboardPlan.id}/confirm`, { method: 'POST' });
+  assert.equal(confirmPlan.response.status, 200);
+  state = (await request(`/projects/${project.id}`)).body;
+  const shots = state.segments.flatMap(segment => segment.shots || []);
+  assert.ok(shots.length >= 1);
+
+  const blocked = await request(`/projects/${project.id}/generation-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `gated-${project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', keyframeRequired: true }),
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.error.code, 'KEYFRAMES_NOT_CONFIRMED');
+
+  for (const shot of shots) {
+    const started = await request(`/shots/${shot.id}/keyframe-tasks`, {
+      method: 'POST', headers: { 'idempotency-key': `keyframe-${shot.id}` },
+      body: JSON.stringify({ count: 2, seed: 200 + shot.sequence }),
+    });
+    assert.equal(started.response.status, 202);
+    const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
+    assert.equal(task.status, 'succeeded');
+  }
+
+  state = (await request(`/projects/${project.id}`)).body;
+  for (const shot of state.segments.flatMap(segment => segment.shots || [])) {
+    assert.ok(shot.keyframeCandidates.length >= 2);
+    const selected = shot.keyframeCandidates[0];
+    const selectedResponse = await request(`/media-assets/${selected.id}/select`, { method: 'POST', body: '{}' });
+    assert.equal(selectedResponse.response.status, 200);
+  }
+  state = (await request(`/projects/${project.id}`)).body;
+  assert.equal(state.keyframeSummary.confirmed, state.keyframeSummary.total);
+  assert.ok(state.segments.flatMap(segment => segment.shots || []).every(shot => shot.generationSignature === null));
+
+  const started = await request(`/projects/${project.id}/generation-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `i2v-${project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', keyframeRequired: true }),
+  });
+  assert.equal(started.response.status, 202);
+  const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
+  const generated = (await request(`/generation-tasks/${task.id}`)).body;
+  assert.equal(task.status, 'succeeded', JSON.stringify({ task, children: generated.generationChildren }, null, 2));
+  const videoAssets = generated.segments.flatMap(segment => (segment.shots || []).flatMap(shot => shot.media || [])).filter(asset => asset.type === 'shot_video');
+  assert.equal(videoAssets.length, state.keyframeSummary.total);
+  assert.ok(videoAssets.every(asset => asset.status === 'ready'));
+});
 test('generates media tasks, assets, and supports idempotent segment regeneration', async () => {
   const { project } = await createReadyScript();
   const confirmed = await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
@@ -300,7 +377,7 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   assert.ok(planned.body.storyboardPlan.shotSelection.segments.length >= 1);
   const firstShot = planned.body.segments[0].shots[0];
   assert.ok(firstShot.plot && firstShot.shotSize && firstShot.movement && firstShot.angle && firstShot.purpose);
-  assert.equal(firstShot.generationSpec.version, 'generation-spec-v1');
+  assert.equal(firstShot.generationSpec.version, 'generation-spec-v2');
   assert.ok(firstShot.generationSpec.visibleAction);
   assert.ok(firstShot.generationSpec.motionPrompt);
   assert.ok(firstShot.focalLengthMm >= 12);

@@ -23,8 +23,8 @@ const port = Number(process.env.PORT || 4173);
 const databasePath = resolve(process.env.DATABASE_PATH || join(root, 'data', 'wenying.sqlite'));
 const mediaRoot = resolve(root, process.env.MEDIA_OUTPUT_DIR || join('data', 'media'));
 process.env.MEDIA_OUTPUT_DIR = mediaRoot;
-if (process.env.COMFYUI_WORKFLOW_PATH && !isAbsolute(process.env.COMFYUI_WORKFLOW_PATH)) {
-  process.env.COMFYUI_WORKFLOW_PATH = resolve(root, process.env.COMFYUI_WORKFLOW_PATH);
+for (const key of ['COMFYUI_WORKFLOW_PATH', 'COMFYUI_WORKFLOW_MANIFEST_PATH', 'COMFYUI_IMAGE_WORKFLOW_PATH', 'COMFYUI_IMAGE_WORKFLOW_MANIFEST_PATH', 'COMFYUI_KEYFRAME_WORKFLOW_PATH', 'COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH']) {
+  if (process.env[key] && !isAbsolute(process.env[key])) process.env[key] = resolve(root, process.env[key]);
 }
 const mime = {
   '.html': 'text/html; charset=utf-8',

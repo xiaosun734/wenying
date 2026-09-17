@@ -1,0 +1,12 @@
+{
+  "3": { "inputs": { "seed": 42, "steps": 8, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["48",0], "positive": ["6",0], "negative": ["7",0], "latent_image": ["5",0] }, "class_type": "KSampler" },
+  "4": { "inputs": { "unet_name": "z_image_turbo_bf16.safetensors", "weight_dtype": "default" }, "class_type": "UNETLoader" },
+  "5": { "inputs": { "width": 576, "height": 1024, "batch_size": 1 }, "class_type": "EmptySD3LatentImage" },
+  "6": { "inputs": { "text": "", "clip": ["38",0] }, "class_type": "CLIPTextEncode", "_meta": { "title": "CLIP Text Encode (Positive Prompt)" } },
+  "7": { "inputs": { "text": "", "clip": ["38",0] }, "class_type": "CLIPTextEncode", "_meta": { "title": "CLIP Text Encode (Negative Prompt)" } },
+  "8": { "inputs": { "samples": ["3",0], "vae": ["39",0] }, "class_type": "VAEDecode" },
+  "9": { "inputs": { "filename_prefix": "wenying/image", "images": ["8",0] }, "class_type": "SaveImage" },
+  "38": { "inputs": { "clip_name": "qwen_3_4b.safetensors", "type": "qwen_image", "device": "default" }, "class_type": "CLIPLoader" },
+  "39": { "inputs": { "vae_name": "ae.safetensors" }, "class_type": "VAELoader" },
+  "48": { "inputs": { "shift": 3, "model": ["4",0] }, "class_type": "ModelSamplingAuraFlow" }
+}

@@ -4177,3 +4177,37 @@ svg {
   .planning-tabs button { min-width: 0; flex: 1; padding-inline: 6px; }
   .planning-ratio-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* P1 visual asset and keyframe review */
+.visual-task-bar { margin-bottom: 16px; position: relative; }
+.visual-task-bar span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 11px; color: var(--muted); }
+.visual-entity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.visual-entity-card { border: 1px solid var(--line); border-radius: 18px; background: var(--surface); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.visual-entity-head { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+.visual-entity-head h4 { margin: 7px 0 5px; font-size: 15px; }
+.visual-entity-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.visual-reference-main { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 14px; border: 1px solid var(--line); background: var(--canvas); }
+.visual-reference-empty { min-height: 150px; border: 1px dashed var(--muted-2); border-radius: 14px; display: grid; place-items: center; color: var(--muted-2); font-size: 12px; }
+.visual-candidate-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.visual-candidate { border: 2px solid transparent; border-radius: 11px; overflow: hidden; padding: 0; background: var(--canvas); cursor: pointer; }
+.visual-candidate.active { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent); }
+.visual-candidate img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; display: block; }
+.visual-candidate span { display: block; padding: 5px 3px; font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keyframe-review-list { display: flex; flex-direction: column; gap: 18px; }
+.keyframe-review-card { display: grid; grid-template-columns: minmax(320px, .85fr) minmax(420px, 1.4fr); gap: 20px; border: 1px solid var(--line); border-radius: 18px; padding: 16px; background: var(--surface); }
+.keyframe-copy { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.keyframe-title-row { display: flex; justify-content: space-between; gap: 12px; }
+.keyframe-title-row h4 { margin: 7px 0 0; font-size: 14px; line-height: 1.55; }
+.keyframe-facts { margin: 0; display: flex; flex-direction: column; gap: 7px; }
+.keyframe-facts div { display: grid; grid-template-columns: 72px 1fr; gap: 8px; }
+.keyframe-facts dt { color: var(--muted-2); font-size: 11px; }
+.keyframe-facts dd { margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted); }
+.keyframe-prompt-edit { min-height: 82px; font-size: 11px; }
+.keyframe-candidates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.keyframe-candidate { border: 2px solid transparent; border-radius: 14px; padding: 0; overflow: hidden; background: var(--canvas); cursor: pointer; }
+.keyframe-candidate.active { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent); }
+.keyframe-candidate img { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; display: block; }
+.keyframe-candidate span { display: block; padding: 7px; font-size: 10px; color: var(--muted); }
+@media (max-width: 960px) {
+  .keyframe-review-card { grid-template-columns: 1fr; }
+}

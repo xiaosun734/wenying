@@ -38,12 +38,14 @@ test('builds an executable generation spec without leaking abstract narrative pu
     style: '日系二维动画电影风格',
   };
   const spec = buildGenerationSpec(shot, beat, bible, { visualStyle: 'anime' });
-  assert.equal(spec.version, 'generation-spec-v1');
+  assert.equal(spec.version, 'generation-spec-v2');
   assert.ok(spec.mustShow.includes('沈砚'));
   assert.ok(spec.mustNotShow.includes('列车实体'));
   assert.ok(spec.mustNotShow.includes('女人实体'));
   assert.ok(spec.audioOnlyEvents.length >= 1);
-  assert.match(spec.motionPrompt, /短黑发/);
+  assert.match(spec.keyframePrompt, /短黑发/);
+  assert.doesNotMatch(spec.motionPrompt, /短黑发|黑色西装/);
+  assert.match(spec.keyframePrompt, /静态关键帧/);
   assert.doesNotMatch(spec.motionPrompt, /列车/);
   assert.doesNotMatch(spec.motionPrompt, /叙事目的/);
 });

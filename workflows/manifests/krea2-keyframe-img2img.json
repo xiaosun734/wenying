@@ -1,0 +1,13 @@
+{
+  "profileId": "krea2-keyframe-img2img",
+  "workflowVersion": 1,
+  "mode": "keyframe-img2img",
+  "positivePrompt": { "node": "6", "field": "text" },
+  "negativePrompt": { "node": "7", "field": "text" },
+  "startImage": { "node": "10", "field": "image" },
+  "seedInputs": [{ "node": "3", "field": "seed", "increment": 0 }],
+  "denoise": { "node": "3", "field": "denoise" },
+  "filenamePrefix": { "node": "9", "field": "filename_prefix" },
+  "outputNode": "9",
+  "requiresStartImage": true
+}

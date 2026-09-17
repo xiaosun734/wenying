@@ -116,3 +116,69 @@ test('keeps protected positive concepts out of the negative prompt', () => {
   assert.match(negative, /低质量/);
   assert.match(negative, /不要出现列车实体/);
 });
+test('ComfyUI provider generates image candidates through an explicit manifest', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'wenying-comfyui-image-'));
+  const workflowPath = join(root, 'image-workflow.json');
+  const manifestPath = join(root, 'image-manifest.json');
+  const mediaRoot = join(root, 'media');
+  await writeFile(workflowPath, JSON.stringify({
+    '3': { class_type: 'KSampler', inputs: { seed: 1, positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+    '5': { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 512, batch_size: 1 } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: '' } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: '' } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'old', images: ['8', 0] } },
+  }));
+  await writeFile(manifestPath, JSON.stringify({
+    profileId: 'test-t2i', mode: 't2i',
+    positivePrompt: { node: '6', field: 'text' }, negativePrompt: { node: '7', field: 'text' },
+    seedInputs: [{ node: '3', field: 'seed' }], width: { node: '5', field: 'width' },
+    height: { node: '5', field: 'height' }, filenamePrefix: { node: '9', field: 'filename_prefix' }, outputNode: '9',
+  }));
+  let submittedPrompt;
+  const server = createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/prompt') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      submittedPrompt = JSON.parse(Buffer.concat(chunks).toString('utf8')).prompt;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ prompt_id: 'image-1' }));
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/history/image-1') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ 'image-1': { outputs: { '9': { images: [{ filename: 'candidate.png', subfolder: 'wenying', type: 'output' }] } } } }));
+      return;
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/view?')) {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(Buffer.from('fake-png'));
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  try {
+    const provider = new ComfyUiMediaProvider({
+      baseUrl: `http://127.0.0.1:${address.port}`, workflowPath,
+      imageWorkflowPath: workflowPath, imageWorkflowManifestPath: manifestPath,
+      mediaRoot, pollMs: 1, timeoutMs: 10_000, negativePrompt: 'blurry',
+    });
+    const result = await provider.generateImage({
+      project: { id: 'project-1' }, prompt: '沈砚正面角色设定图', seed: 77, filenamePrefix: 'character_front',
+      width: 576, height: 1024, metadata: { entityId: 'character_1' },
+    });
+    assert.equal(submittedPrompt['6'].inputs.text, '沈砚正面角色设定图');
+    assert.equal(submittedPrompt['7'].inputs.text, 'blurry');
+    assert.equal(submittedPrompt['3'].inputs.seed, 77);
+    assert.equal(submittedPrompt['5'].inputs.width, 576);
+    assert.equal(submittedPrompt['5'].inputs.height, 1024);
+    assert.match(submittedPrompt['9'].inputs.filename_prefix, /^wenying\/project-1\/visual-assets\/character_front/);
+    assert.equal(result.objectKey, 'projects/project-1/visual-assets/character_front-77.png');
+    assert.match(result.metadata.sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(await readFile(join(mediaRoot, result.objectKey)), Buffer.from('fake-png'));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});

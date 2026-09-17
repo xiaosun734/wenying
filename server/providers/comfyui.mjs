@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { optionalPrompt, renderPrompt } from '../prompt-config.mjs';
+import { applyWorkflowManifest, loadWorkflowManifest, validateWorkflowForManifest } from '../workflow-manifest.mjs';
 import { probeMedia } from '../media-probe.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
@@ -26,6 +27,16 @@ export class ComfyUiMediaProvider {
   constructor({
     baseUrl,
     workflowPath,
+    workflowManifestPath = '',
+    imageWorkflowPath = '',
+    imageWorkflowManifestPath = '',
+    keyframeWorkflowPath = '',
+    keyframeWorkflowManifestPath = '',
+    keyframeDenoise = 0.82,
+    useReferenceForKeyframes = true,
+    imageNegativePrompt = '',
+    imageWidth = 576,
+    imageHeight = 1024,
     mediaRoot = './data/media',
     timeoutMs = 900000,
     pollMs = 1000,
@@ -45,6 +56,16 @@ export class ComfyUiMediaProvider {
     this.model = 'comfyui-workflow';
     this.baseUrl = String(baseUrl || '').replace(/\/+$/, '');
     this.workflowPath = workflowPath ? resolve(workflowPath) : '';
+    this.workflowManifestPath = workflowManifestPath ? resolve(workflowManifestPath) : '';
+    this.imageWorkflowPath = imageWorkflowPath ? resolve(imageWorkflowPath) : '';
+    this.imageWorkflowManifestPath = imageWorkflowManifestPath ? resolve(imageWorkflowManifestPath) : '';
+    this.keyframeWorkflowPath = keyframeWorkflowPath ? resolve(keyframeWorkflowPath) : '';
+    this.keyframeWorkflowManifestPath = keyframeWorkflowManifestPath ? resolve(keyframeWorkflowManifestPath) : '';
+    this.keyframeDenoise = Math.max(0, Math.min(1, Number(keyframeDenoise) || 0.82));
+    this.useReferenceForKeyframes = Boolean(useReferenceForKeyframes);
+    this.imageNegativePrompt = String(imageNegativePrompt || '');
+    this.imageWidth = Math.max(64, Number(imageWidth) || 576);
+    this.imageHeight = Math.max(64, Number(imageHeight) || 1024);
     this.mediaRoot = resolve(mediaRoot || './data/media');
     this.timeoutMs = Math.max(10_000, Number(timeoutMs) || 900000);
     this.pollMs = Math.max(250, Number(pollMs) || 1000);
@@ -61,12 +82,13 @@ export class ComfyUiMediaProvider {
     this.ffprobePath = ffprobePath || process.env.FFPROBE_PATH || 'ffprobe';
   }
 
-  async generateVideo({ project, segmentVersion, shot = null }) {
+  async generateVideo({ project, segmentVersion, shot = null, startImagePath = null, keyframeAsset = null, generationSignature = null }) {
     this.assertConfigured();
-    const workflow = await this.loadWorkflow();
+    const manifest = await loadWorkflowManifest(this.workflowManifestPath);
     const clientId = randomUUID();
-    const uploadedImage = await this.uploadInputImage(clientId, segmentVersion);
-    const prepared = this.preparePrompt(workflow, { project, segmentVersion, shot, uploadedImage });
+    const workflow = await this.loadWorkflow(this.workflowPath, manifest);
+    const uploadedImage = await this.uploadInputImage(clientId, startImagePath || segmentVersion.first_frame_path || this.inputImagePath);
+    const prepared = this.preparePrompt(workflow, { project, segmentVersion, shot, uploadedImage, manifest });
     const prompt = prepared.prompt;
     const submitted = await this.requestJson('/prompt', {
       method: 'POST',
@@ -111,6 +133,10 @@ export class ComfyUiMediaProvider {
         subfolder: output.subfolder || '',
         type: output.type || 'output',
         workflowPath: this.workflowPath,
+        workflowManifestPath: this.workflowManifestPath || null,
+        generationSignature,
+        keyframeAssetId: keyframeAsset?.id || null,
+        startImage: Boolean(uploadedImage),
         width: probe?.width || this.width,
         height: probe?.height || this.height,
         frames: prepared.frames,
@@ -127,17 +153,126 @@ export class ComfyUiMediaProvider {
     };
   }
 
-  assertConfigured() {
+  async generateImage({ project, prompt, negativePrompt = '', seed, filenamePrefix = 'image', width, height, referenceImagePath = null, metadata = {} }) {
+    const useReference = Boolean(referenceImagePath && this.keyframeWorkflowPath && this.useReferenceForKeyframes);
+    const workflowPath = useReference ? this.keyframeWorkflowPath : this.imageWorkflowPath;
+    const manifestPath = useReference ? this.keyframeWorkflowManifestPath : this.imageWorkflowManifestPath;
+    this.assertConfigured(workflowPath);
+    const manifest = await loadWorkflowManifest(manifestPath);
+    const workflow = await this.loadWorkflow(workflowPath, manifest);
+    const imageWidth = Math.max(64, Number(width || this.imageWidth) || 576);
+    const imageHeight = Math.max(64, Number(height || this.imageHeight) || 1024);
+    const imageSeed = seed === undefined || seed === null || seed === '' ? Math.floor(Math.random() * 2 ** 31) : Number(seed);
+    const clientId = randomUUID();
+    const uploadedImage = useReference ? await this.uploadInputImage(clientId, referenceImagePath) : null;
+    const combinedNegative = [this.imageNegativePrompt, negativePrompt || this.negativePrompt].filter(Boolean).join('，');
+    const prepared = this.prepareImageWorkflow(workflow, {
+      prompt: String(prompt || ''),
+      negativePrompt: combinedNegative,
+      seed: imageSeed,
+      width: imageWidth,
+      height: imageHeight,
+      denoise: this.keyframeDenoise,
+      startImage: uploadedImage || undefined,
+      filenamePrefix: `wenying/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}`,
+      manifest,
+    });
+    const submitted = await this.requestJson('/prompt', {
+      method: 'POST',
+      body: JSON.stringify({ prompt: prepared.prompt, client_id: clientId }),
+    });
+    if (!submitted?.prompt_id) throw new ComfyUiError('ComfyUI 未返回 prompt_id', 'COMFYUI_SUBMIT_FAILED', submitted);
+    const output = await this.waitForOutput(submitted.prompt_id, 'image');
+    const response = await this.request(`/view?${new URLSearchParams({
+      filename: output.filename, subfolder: output.subfolder || '', type: output.type || 'output',
+    })}`);
+    const data = Buffer.from(await response.arrayBuffer());
+    const extension = output.extension || '.png';
+    const objectKey = `projects/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}-${imageSeed}${extension}`;
+    const outputPath = resolve(this.mediaRoot, objectKey);
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, data);
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    return {
+      objectKey,
+      durationMs: 0,
+      sizeBytes: data.length,
+      metadata: {
+        ...metadata,
+        promptId: submitted.prompt_id,
+        filename: output.filename,
+        subfolder: output.subfolder || '',
+        type: output.type || 'output',
+        workflowPath,
+        workflowManifestPath: manifestPath || null,
+        manifestProfileId: prepared.manifestProfileId,
+        width: imageWidth,
+        height: imageHeight,
+        prompt: prepared.positiveText,
+        negativePrompt: prepared.negativeText,
+        seed: prepared.seed,
+        workflowHash: prepared.workflowHash,
+        startImage: Boolean(uploadedImage),
+        referenceImagePath: referenceImagePath || null,
+        sha256,
+      },
+    };
+  }
+  prepareImageWorkflow(prompt, { prompt: positiveText, negativePrompt, seed, width, height, denoise, startImage, filenamePrefix, manifest = null }) {
+    if (manifest) {
+      applyWorkflowManifest(prompt, manifest, {
+        positivePrompt: positiveText,
+        negativePrompt,
+        seed,
+        width,
+        height,
+        denoise,
+        startImage,
+      });
+      if (manifest.filenamePrefix) setManifestValue(prompt, manifest.filenamePrefix, filenamePrefix);
+      const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+      return { prompt, positiveText, negativeText: negativePrompt, seed, workflowHash, manifestProfileId: manifest.profileId };
+    }
+    let positiveSet = false;
+    let negativeSet = false;
+    let seedSet = false;
+    let sizeSet = false;
+    let prefixSet = false;
+    for (const [, node] of Object.entries(prompt)) {
+      if (!node?.inputs) continue;
+      const classType = String(node.class_type || '').toLowerCase();
+      const title = String(node._meta?.title || '').toLowerCase();
+      if (classType.includes('cliptextencode') && typeof node.inputs.text === 'string') {
+        const isNegative = title.includes('negative') || title.includes('反向') || title.includes('负面') || (!positiveSet && negativeSet);
+        if (isNegative && !negativeSet) { node.inputs.text = negativePrompt; negativeSet = true; }
+        else if (!positiveSet) { node.inputs.text = positiveText; positiveSet = true; }
+        else if (!negativeSet) { node.inputs.text = negativePrompt; negativeSet = true; }
+      }
+      if (['ksampler', 'ksampleradvanced'].includes(classType) && 'seed' in node.inputs) { node.inputs.seed = seed; seedSet = true; }
+      if (classType === 'emptylatentimage') {
+        if ('width' in node.inputs) { node.inputs.width = width; sizeSet = true; }
+        if ('height' in node.inputs) node.inputs.height = height;
+      }
+      if (classType === 'saveimage' && 'filename_prefix' in node.inputs) { node.inputs.filename_prefix = filenamePrefix; prefixSet = true; }
+      if (startImage && classType === 'loadimage' && 'image' in node.inputs) node.inputs.image = startImage;
+    }
+    if (!positiveSet || !negativeSet || !seedSet || !sizeSet || !prefixSet) {
+      throw new ComfyUiError('图片工作流缺少必需的正负提示、seed、尺寸或 SaveImage 节点，请配置 manifest', 'COMFYUI_IMAGE_WORKFLOW_INVALID');
+    }
+    const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+    return { prompt, positiveText, negativeText: negativePrompt, seed, workflowHash, manifestProfileId: null };
+  }
+  assertConfigured(workflowPath = this.workflowPath) {
     if (!this.baseUrl) throw new ComfyUiError('未配置 COMFYUI_BASE_URL', 'COMFYUI_NOT_CONFIGURED');
-    if (!this.workflowPath) throw new ComfyUiError('未配置 COMFYUI_WORKFLOW_PATH', 'COMFYUI_NOT_CONFIGURED');
+    if (!workflowPath) throw new ComfyUiError('未配置 ComfyUI 工作流路径', 'COMFYUI_NOT_CONFIGURED');
   }
 
-  async loadWorkflow() {
+  async loadWorkflow(path = this.workflowPath, manifest = null) {
     let contents;
     try {
-      contents = await readFile(this.workflowPath, 'utf8');
+      contents = await readFile(path, 'utf8');
     } catch (error) {
-      throw new ComfyUiError(`无法读取 ComfyUI 工作流文件：${this.workflowPath}`, 'COMFYUI_WORKFLOW_NOT_FOUND', error.message);
+      throw new ComfyUiError(`无法读取 ComfyUI 工作流文件：${path}`, 'COMFYUI_WORKFLOW_NOT_FOUND', error.message);
     }
     let parsed;
     try {
@@ -151,11 +286,13 @@ export class ComfyUiMediaProvider {
     if (!prompt || typeof prompt !== 'object' || Array.isArray(prompt) || prompt.nodes) {
       throw new ComfyUiError('工作流必须是 ComfyUI 的 Save (API Format) JSON', 'COMFYUI_WORKFLOW_INVALID');
     }
-    return structuredClone(prompt);
+    const workflow = structuredClone(prompt);
+    validateWorkflowForManifest(workflow, manifest);
+    return workflow;
   }
 
-  async uploadInputImage(clientId, segmentVersion) {
-    const imagePath = segmentVersion.first_frame_path || this.inputImagePath;
+  async uploadInputImage(clientId, imagePath) {
+    
     if (!imagePath) return null;
     let data;
     try {
@@ -173,7 +310,7 @@ export class ComfyUiMediaProvider {
     return payload.subfolder ? `${payload.subfolder}/${payload.name}` : payload.name;
   }
 
-  preparePrompt(prompt, { project, segmentVersion, shot, uploadedImage }) {
+  preparePrompt(prompt, { project, segmentVersion, shot, uploadedImage, manifest = null }) {
     const fallbackText = renderPrompt(optionalPrompt('VIDEO_FINAL_FALLBACK_PROMPT_TEMPLATE'), {
       genre: project.genre,
       scriptText: segmentVersion.script_text || '',
@@ -184,10 +321,27 @@ export class ComfyUiMediaProvider {
     const requestedDurationMs = Number(shot?.duration_ms || segmentVersion.duration_ms || 0);
     const frames = wanFrameCount(requestedDurationMs, this.fps, this.frames);
     const seed = this.fixedSeed === null ? Math.floor(Math.random() * 2 ** 31) : this.fixedSeed;
-    const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+    const filenamePrefix = `wenying_${safePart(project.id)}_${safePart(segmentVersion.id)}${shot ? `_${safePart(shot.id)}` : ''}`;
+
+    if (manifest) {
+      applyWorkflowManifest(prompt, manifest, {
+        positivePrompt: positiveText,
+        negativePrompt: negativeText,
+        seed,
+        width: this.width,
+        height: this.height,
+        frames,
+        fps: this.fps,
+        startImage: uploadedImage || undefined,
+      });
+      if (manifest.filenamePrefix) setManifestValue(prompt, manifest.filenamePrefix, filenamePrefix);
+      const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+      return { prompt, positiveText, negativeText, seed, frames, workflowHash, manifestProfileId: manifest.profileId };
+    }
+
     let positiveSet = false;
     let negativeSet = false;
-
+    let startImageSet = false;
     for (const [, node] of Object.entries(prompt)) {
       if (!node || typeof node !== 'object' || !node.inputs) continue;
       const classType = String(node.class_type || '').toLowerCase();
@@ -201,18 +355,17 @@ export class ComfyUiMediaProvider {
           node.inputs.text = positiveText;
           positiveSet = true;
         } else if (!negativeSet) {
-          // Some exported workflows do not preserve node titles. In the
-          // common two-text-node layout, the second encoder is negative.
           node.inputs.text = negativeText;
           negativeSet = true;
         }
       }
-      if (uploadedImage && classType === 'loadimage' && 'image' in node.inputs) node.inputs.image = uploadedImage;
-      if (['ksampler', 'ksampleradvanced'].includes(classType) && 'seed' in node.inputs) {
-        node.inputs.seed = seed;
+      if (uploadedImage && classType === 'loadimage' && 'image' in node.inputs) {
+        node.inputs.image = uploadedImage;
+        startImageSet = true;
       }
+      if (['ksampler', 'ksampleradvanced'].includes(classType) && 'seed' in node.inputs) node.inputs.seed = seed;
       if (['savevideo', 'videocombine', 'vhs_videocombine', 'saveanimatedwebp'].includes(classType)) {
-        if ('filename_prefix' in node.inputs) node.inputs.filename_prefix = `wenying_${safePart(project.id)}_${safePart(segmentVersion.id)}${shot ? `_${safePart(shot.id)}` : ''}`;
+        if ('filename_prefix' in node.inputs) node.inputs.filename_prefix = filenamePrefix;
         if ('fps' in node.inputs) node.inputs.fps = this.fps;
         if ('frame_rate' in node.inputs) node.inputs.frame_rate = this.fps;
       }
@@ -228,12 +381,12 @@ export class ComfyUiMediaProvider {
         setIfPresent(node.inputs, 'frames', frames);
       }
     }
-
-    if (!positiveSet) throw new ComfyUiError('工作流中没有可替换的正向 CLIPTextEncode 节点', 'COMFYUI_WORKFLOW_MISSING_PROMPT');
-    return { prompt, positiveText, negativeText, seed, frames, workflowHash };
+    if (!positiveSet || !negativeSet) throw new ComfyUiError('工作流必须包含可替换的正向和负向文本节点', 'COMFYUI_WORKFLOW_MISSING_PROMPT');
+    if (uploadedImage && !startImageSet) throw new ComfyUiError('工作流缺少 LoadImage 节点，无法消费已确认首帧', 'COMFYUI_START_IMAGE_NODE_MISSING');
+    const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
+    return { prompt, positiveText, negativeText, seed, frames, workflowHash, manifestProfileId: null };
   }
-
-  async waitForOutput(promptId) {
+  async waitForOutput(promptId, kind = 'video') {
     const startedAt = Date.now();
     while (Date.now() - startedAt < this.timeoutMs) {
       const history = await this.requestJson(`/history/${encodeURIComponent(promptId)}`);
@@ -242,7 +395,7 @@ export class ComfyUiMediaProvider {
       if (status === 'error' || status === 'failed') {
         throw new ComfyUiError('ComfyUI 工作流执行失败', 'COMFYUI_EXECUTION_FAILED', item?.status);
       }
-      const output = findVideoOutput(item?.outputs);
+      const output = kind === 'image' ? findImageOutput(item?.outputs) : findVideoOutput(item?.outputs);
       if (output) return output;
       await sleep(this.pollMs);
     }
@@ -338,6 +491,31 @@ function expandConceptAliases(concepts) {
   return [...new Set(output)];
 }
 
+function findImageOutput(outputs) {
+  if (!outputs || typeof outputs !== 'object') return null;
+  const candidates = [];
+  walk(outputs, value => {
+    if (!value || typeof value !== 'object' || !value.filename) return;
+    const extension = extname(String(value.filename)).toLowerCase();
+    if (['.png', '.jpg', '.jpeg', '.webp'].includes(extension)) {
+      candidates.push({
+        filename: String(value.filename),
+        subfolder: String(value.subfolder || ''),
+        type: String(value.type || 'output'),
+        extension,
+      });
+    }
+  });
+  return candidates[0] || null;
+}
+
+function setManifestValue(workflow, spec, value) {
+  const node = workflow[String(spec.node)];
+  if (!node?.inputs || !(spec.field in node.inputs)) {
+    throw new ComfyUiError(`manifest 字段指向不存在的输入 ${spec.node}.${spec.field}`, 'COMFYUI_WORKFLOW_MANIFEST_INVALID');
+  }
+  node.inputs[spec.field] = value;
+}
 function findVideoOutput(outputs) {
   if (!outputs || typeof outputs !== 'object') return null;
   const candidates = [];

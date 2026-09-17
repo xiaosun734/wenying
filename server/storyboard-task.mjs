@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import {
   clearStoryboardArtifacts,
   createRetrievalRun,
@@ -17,6 +17,7 @@ import {
   updateStoryboardTask,
 } from './db.mjs';
 import { RETRIEVAL_STRATEGY_VERSION } from './knowledge-retriever.mjs';
+import { normalizeVisualBibleContent, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
 
 const terminalStates = new Set(['succeeded', 'failed', 'canceled']);
 
@@ -59,9 +60,14 @@ export class StoryboardTaskRunner {
         durationMs: segment.duration_ms,
         targetShotCount: Math.max(1, Math.ceil(segment.duration_ms / 5000)),
       }));
+      const sourceHash = buildGenerationSignature({
+        kind: 'script-source',
+        scriptVersionId: plan.script_version_id,
+        source: segmentInputs.map(item => ({ id: item.id, sequence: item.sequence, scriptText: item.scriptText })),
+      });
 
       updateStoryboardTask(this.db, task.id, { current_step: 'building_visual_bible', progress: 8, updated_at: timestamp() });
-      let bible = getLatestVisualBible(this.db, project.id);
+      let bible = getLatestVisualBible(this.db, project.id, plan.script_version_id);
       if (!bible || bible.content?.visualStyle !== plan.configuration.visualStyle) {
         const generatedContent = await this.provider.generateVisualBible({
           segments: segmentInputs,
@@ -70,7 +76,7 @@ export class StoryboardTaskRunner {
           idempotencyKey: `${task.id}:visual-bible`,
         });
         const content = { ...generatedContent, visualStyle: plan.configuration.visualStyle };
-        bible = createVisualBible(this.db, { id: randomUUID(), projectId: project.id, content, confirmed: false });
+        bible = createVisualBible(this.db, { id: randomUUID(), projectId: project.id, scriptVersionId: plan.script_version_id, sourceHash, content, confirmed: false });
       }
 
       let directorAnalysis = plan.director_analysis;
@@ -141,6 +147,7 @@ export class StoryboardTaskRunner {
       }), segmentInputs);
 
       clearStoryboardArtifacts(this.db, plan.id);
+      const bibleHash = visualBibleContentHash(bible.content);
       const createdShots = [];
       for (const storyboardSegment of storyboard.segments) {
         const segment = segments.find(item => item.id === storyboardSegment.segmentId);
@@ -156,13 +163,24 @@ export class StoryboardTaskRunner {
             .find(item => item.segmentId === storyboardSegment.segmentId)?.beats
             .find(item => item.beatId === shot.beatId);
           const generationSpec = buildGenerationSpec(shot, beat, bible.content, plan.configuration);
+          const keyframeSignature = buildGenerationSignature({
+            kind: 'keyframe', visualBibleHash: bibleHash, referenceAssetIds: generationSpec.referenceAssetIds,
+            promptCompilerVersion: 'keyframe-prompt-v1', prompt: generationSpec.keyframePrompt,
+            width: plan.configuration.width || null, height: plan.configuration.height || null,
+          });
+          const motionSignature = buildGenerationSignature({
+            kind: 'motion', visualBibleHash: bibleHash, referenceAssetIds: generationSpec.referenceAssetIds,
+            keyframeSignature, promptCompilerVersion: 'motion-prompt-v1', prompt: generationSpec.motionPrompt,
+          });
           const created = createSegmentShot(this.db, {
             id: randomUUID(), segmentVersionId: version.id, storyboardPlanId: plan.id, sequence: index + 1,
             beatId: shot.beatId, plot: shot.plot, shotSize: shot.shotSize, movement: shot.movement,
             angle: shot.angle, focalLengthMm: shot.focalLengthMm, composition: shot.composition,
             purpose: shot.purpose, durationMs: durations[index], selectionReason: shot.selectionReason,
             evidenceIds: shot.evidenceIds, generationSpec,
-            promptZh: compileVideoPrompt(shot, bible.content, plan.configuration, generationSpec), status: 'planned',
+            keyframePromptZh: generationSpec.keyframePrompt, keyframeStatus: 'missing',
+            keyframeSignature, motionSignature,
+            promptZh: compileMotionPrompt(shot, bible.content, plan.configuration, generationSpec), status: 'planned',
           });
           createdShots.push({ ...created, transitionToNext: shot.transitionToNext });
         }
@@ -205,60 +223,109 @@ function stepLabel(step) {
   })[step] || '前期策划';
 }
 
-export function compileVideoPrompt(shot, visualBible, configuration, providedSpec = null) {
+export function compileKeyframePrompt(shot, visualBible, configuration, providedSpec = null) {
+  const spec = providedSpec || buildGenerationSpec(shot, null, visualBible, configuration);
+  return spec.keyframePrompt || spec.motionPrompt;
+}
+
+export function compileMotionPrompt(shot, visualBible, configuration, providedSpec = null) {
   const spec = providedSpec || buildGenerationSpec(shot, null, visualBible, configuration);
   return spec.motionPrompt;
 }
 
+// Backwards-compatible name. Existing callers receive the motion-only prompt.
+export function compileVideoPrompt(shot, visualBible, configuration, providedSpec = null) {
+  return compileMotionPrompt(shot, visualBible, configuration, providedSpec);
+}
+
 export function buildGenerationSpec(shot, beat, visualBible = {}, configuration = {}) {
+  const bible = normalizeVisualBibleContent(visualBible);
   const plot = text(shot?.plot || beat?.plot, 400);
   const rawVisibleAction = text(beat?.visibleAction, 240) || translateVisibleAction(beat?.action || plot);
   const constraints = Array.isArray(beat?.continuityConstraints) ? beat.continuityConstraints.map(String) : [];
   const mustNotShow = unique([...(beat?.mustNotShow || []), ...inferMustNotShow(constraints, plot)]);
   const audioOnlyEvents = unique([...(beat?.audioOnlyEvents || []), ...inferAudioOnlyEvents(constraints, plot)]);
   const visibleAction = sanitizeVisibleAction(rawVisibleAction, mustNotShow, audioOnlyEvents);
-  const characters = selectCharacters(visualBible?.characters, `${plot} ${visibleAction}`);
-  const scenes = Array.isArray(visualBible?.scenes) ? visualBible.scenes.slice(0, 2) : [];
+  const characters = selectCharacters(bible.characters, `${plot} ${visibleAction}`);
+  const scenes = Array.isArray(bible.scenes) ? bible.scenes.slice(0, 2) : [];
+  const props = Array.isArray(bible.props) ? bible.props.filter(prop => {
+    const haystack = `${plot} ${visibleAction} ${beat?.mustShow?.join?.(' ') || ''}`;
+    return haystack.includes(prop.name) || (prop.name === '电子屏' && /屏幕|时间|23|23:17|闪烁/.test(haystack));
+  }).slice(0, 3) : [];
   const mustShow = unique([
     ...(beat?.mustShow || []),
     ...characters.map(character => character.name),
     ...scenes.map(scene => scene.name),
+    ...props.map(prop => prop.name),
   ]).filter(Boolean);
   const protectedPositiveConcepts = unique([
     ...mustShow,
     ...(plot.includes('闪烁') ? ['闪烁'] : []),
   ]);
-  const style = visualBible?.style || configuration.visualStyle || 'cinematic';
-  const identity = characters.map(character => [character.name, character.appearance, character.costume].filter(Boolean).join('，')).join('；');
+  const style = bible.style || configuration.visualStyle || 'cinematic';
   const postproductionElements = unique([...(beat?.postproductionElements || []), ...inferPostproductionElements(plot)]);
   const sceneDescription = scenes.map(scene => [
     scene.name,
     sanitizeReferenceDescription(scene.description, mustNotShow, audioOnlyEvents, `${plot} ${visibleAction}`),
+    scene.layout ? `空间方向：${scene.layout}` : '',
+    scene.lighting ? `光线：${scene.lighting}` : '',
+    scene.colorPalette ? `色板：${scene.colorPalette}` : '',
   ].filter(Boolean).join('：')).join('；');
+  const characterIdentity = characters.map(character => [
+    character.name,
+    character.age ? `年龄${character.age}` : '',
+    character.face || character.appearance,
+    character.hair,
+    character.body,
+    character.costume,
+  ].filter(Boolean).join('，')).join('；');
+  const propDescription = props.map(prop => [
+    prop.name,
+    prop.description,
+    prop.material,
+    prop.state,
+  ].filter(Boolean).join('，')).join('；');
   const keep = unique([
-    ...characters.map(character => `${character.name}的外貌与服装`),
-    ...scenes.map(scene => `${scene.name}的空间布局与光线`),
+    ...characters.map(character => `${character.name}的身份、面部和服装`),
+    ...scenes.map(scene => `${scene.name}的空间布局、主要道具和光线`),
   ]);
-  const camera = [shot?.shotSize, shot?.angle, shot?.composition, shot?.focalLengthMm ? `${shot.focalLengthMm}mm 焦段` : '', shot?.movement]
+  const camera = [shot?.shotSize, shot?.angle, shot?.composition, shot?.focalLengthMm ? `${shot.focalLengthMm}mm 焦段` : '']
     .filter(Boolean).join('，');
+  const startState = text(beat?.startState, 200) || (visibleAction ? '动作开始前保持当前人物和场景状态' : '');
+  const endState = text(beat?.endState, 200) || (visibleAction ? '动作完成后保持当前状态' : '');
   const exactTextInPost = postproductionElements.some(item => /精确.*文字|后期叠加/.test(item));
-  const motionPrompt = [
-    identity,
+  const keyframePrompt = [
+    characterIdentity,
     sceneDescription,
-    visibleAction,
+    propDescription,
+    startState,
     camera,
     style,
-    keep.length ? `保持${keep.join('、')}不变` : '',
-    '单一连续动作，无对白字幕，无镜头切换',
+    '静态关键帧：单幅完整电影画面，只确定人物身份、场景、道具、构图、光线和动作起始状态',
+    '禁止上下分屏、多格漫画、拼贴、重复人物、可读字幕或可读数字',
+    '不包含对白字幕，不提前出现后续事件实体',
   ].filter(Boolean).join('；');
+  const environmentDynamics = audioOnlyEvents.length
+    ? '保留画外声源造成的可见环境反应，但不得把画外实体具象化'
+    : '按当前动作自然带动环境动态';
+  const motionPrompt = [
+    visibleAction,
+    `动作速度：${text(beat?.actionSpeed || '中', 20)}`,
+    environmentDynamics,
+    [shot?.movement, '镜头运动保持单一、连续、可执行'].filter(Boolean).join('，'),
+    keep.length ? `保持${keep.join('、')}不变` : '',
+    '从已确认首帧开始连续运动，无镜头切换，无对白字幕',
+  ].filter(Boolean).join('；');
+  const sanitizedKeyframePrompt = exactTextInPost ? replaceExactScreenText(keyframePrompt) : keyframePrompt;
   const sanitizedMotionPrompt = exactTextInPost ? replaceExactScreenText(motionPrompt) : motionPrompt;
   return {
-    version: 'generation-spec-v1',
+    version: 'generation-spec-v2',
     plot,
     visibleSubject: characters.map(character => character.name).join('、'),
     visibleAction,
-    startState: text(beat?.startState, 200) || (visibleAction ? `动作开始前保持当前人物和场景状态` : ''),
-    endState: text(beat?.endState, 200) || (visibleAction ? '动作完成后保持当前状态' : ''),
+    startState,
+    endState,
+    actionSpeed: text(beat?.actionSpeed || '中', 20),
     mustShow,
     mustNotShow,
     audioOnlyEvents,
@@ -267,10 +334,16 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
     continuityConstraints: constraints,
     characterReferences: characters,
     sceneReferences: scenes,
+    propReferences: props,
+    referenceAssetIds: unique([
+      ...characters.map(character => character.selectedReferenceAssetId),
+      ...scenes.map(scene => scene.selectedReferenceAssetId),
+      ...props.map(prop => prop.selectedReferenceAssetId),
+    ]),
+    keyframePrompt: sanitizedKeyframePrompt,
     motionPrompt: sanitizedMotionPrompt,
   };
 }
-
 function validateDirectorAnalysis(value, segments) {
   if (!Array.isArray(value?.segments)) throw invalid('导演分析缺少 segments');
   const normalized = value.segments.map(item => ({
@@ -463,3 +536,4 @@ export async function waitForStoryboardTask(runner, taskId, timeoutMs = 30000) {
   }
   return getStoryboardTask(runner.db, taskId);
 }
+

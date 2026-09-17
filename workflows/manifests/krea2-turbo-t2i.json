@@ -1,0 +1,13 @@
+{
+  "profileId": "krea2-turbo-t2i",
+  "workflowVersion": 1,
+  "mode": "t2i",
+  "positivePrompt": { "node": "6", "field": "text" },
+  "negativePrompt": { "node": "7", "field": "text" },
+  "seedInputs": [{ "node": "3", "field": "seed", "increment": 0 }],
+  "width": { "node": "5", "field": "width" },
+  "height": { "node": "5", "field": "height" },
+  "filenamePrefix": { "node": "9", "field": "filename_prefix" },
+  "outputNode": "9",
+  "requiresStartImage": false
+}

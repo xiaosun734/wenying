@@ -2,8 +2,9 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { normalizeVisualBibleContent, visualBibleContentHash } from './visual-assets.mjs';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 8;
 
 const now = () => new Date().toISOString();
 const metadataLogPaths = new WeakMap();
@@ -115,8 +116,13 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
     CREATE TABLE IF NOT EXISTS visual_bibles (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      script_version_id TEXT REFERENCES script_versions(id) ON DELETE CASCADE,
+      source_hash TEXT NOT NULL DEFAULT '',
       content_json TEXT NOT NULL,
+      content_hash TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
       revision INTEGER NOT NULL DEFAULT 0,
+      confirmed_at TEXT,
       confirmed INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -146,6 +152,14 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
       selection_reason TEXT NOT NULL DEFAULT '',
       evidence_ids_json TEXT,
       generation_spec_json TEXT NOT NULL DEFAULT '{}',
+      keyframe_prompt_zh TEXT NOT NULL DEFAULT '',
+      keyframe_prompt_en TEXT NOT NULL DEFAULT '',
+      keyframe_status TEXT NOT NULL DEFAULT 'missing',
+      selected_keyframe_asset_id TEXT,
+      selected_endframe_asset_id TEXT,
+      generation_signature TEXT,
+      keyframe_signature TEXT,
+      motion_signature TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(segment_version_id, sequence)
@@ -257,6 +271,8 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
       metadata_json TEXT,
       duration_ms INTEGER NOT NULL DEFAULT 0,
       size_bytes INTEGER NOT NULL DEFAULT 0,
+      generation_signature TEXT,
+      source_asset_id TEXT,
       status TEXT NOT NULL DEFAULT 'ready',
       created_at TEXT NOT NULL
     );
@@ -346,6 +362,25 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
   }
   const assetColumns = db.prepare('PRAGMA table_info(media_assets)').all().map(column => column.name);
   if (!assetColumns.includes('shot_id')) db.exec('ALTER TABLE media_assets ADD COLUMN shot_id TEXT REFERENCES segment_shots(id) ON DELETE CASCADE');
+  const bibleColumns = db.prepare('PRAGMA table_info(visual_bibles)').all().map(column => column.name);
+  if (!bibleColumns.includes('script_version_id')) db.exec('ALTER TABLE visual_bibles ADD COLUMN script_version_id TEXT');
+  if (!bibleColumns.includes('source_hash')) db.exec("ALTER TABLE visual_bibles ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''");
+  if (!bibleColumns.includes('content_hash')) db.exec("ALTER TABLE visual_bibles ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''");
+  if (!bibleColumns.includes('status')) db.exec("ALTER TABLE visual_bibles ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'");
+  if (!bibleColumns.includes('confirmed_at')) db.exec('ALTER TABLE visual_bibles ADD COLUMN confirmed_at TEXT');
+  const visualShotMigrations = [
+    ['keyframe_prompt_zh', "TEXT NOT NULL DEFAULT ''"], ['keyframe_prompt_en', "TEXT NOT NULL DEFAULT ''"],
+    ['keyframe_status', "TEXT NOT NULL DEFAULT 'missing'"], ['selected_keyframe_asset_id', 'TEXT'],
+    ['selected_endframe_asset_id', 'TEXT'], ['generation_signature', 'TEXT'],
+    ['keyframe_signature', 'TEXT'], ['motion_signature', 'TEXT'],
+  ];
+  for (const [column, definition] of visualShotMigrations) {
+    if (!shotColumns.includes(column)) db.exec(`ALTER TABLE segment_shots ADD COLUMN ${column} ${definition}`);
+  }
+  if (!assetColumns.includes('generation_signature')) db.exec('ALTER TABLE media_assets ADD COLUMN generation_signature TEXT');
+  if (!assetColumns.includes('source_asset_id')) db.exec('ALTER TABLE media_assets ADD COLUMN source_asset_id TEXT');
+  db.exec("CREATE INDEX IF NOT EXISTS idx_media_assets_signature ON media_assets(generation_signature)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_segment_shots_keyframe_status ON segment_shots(keyframe_status)");
   db.prepare('INSERT INTO schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('version', String(SCHEMA_VERSION));
   return db;
 }
@@ -573,13 +608,20 @@ export function updateSegmentVersion(db, id, fields) {
 
 export function createVisualBible(db, bible) {
   const timestamp = now();
-  db.prepare('INSERT INTO visual_bibles(id, project_id, content_json, revision, confirmed, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?)')
-    .run(bible.id, bible.projectId, JSON.stringify(bible.content || {}), bible.confirmed ? 1 : 0, timestamp, timestamp);
+  const content = normalizeVisualBibleContent(bible.content || {});
+  const contentHash = visualBibleContentHash(content);
+  const scriptVersionId = bible.scriptVersionId || null;
+  const sourceHash = String(bible.sourceHash || '').trim();
+  const status = bible.confirmed ? 'confirmed' : 'draft';
+  db.prepare('INSERT INTO visual_bibles(id, project_id, script_version_id, source_hash, content_json, content_hash, status, revision, confirmed, confirmed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)')
+    .run(bible.id, bible.projectId, scriptVersionId, sourceHash, JSON.stringify(content), contentHash, status, bible.confirmed ? 1 : 0, bible.confirmed ? timestamp : null, timestamp, timestamp);
   return getVisualBible(db, bible.id);
 }
-
-export function getLatestVisualBible(db, projectId) {
-  const row = db.prepare('SELECT * FROM visual_bibles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1').get(projectId);
+export function getLatestVisualBible(db, projectId, scriptVersionId = null) {
+  const query = scriptVersionId
+    ? 'SELECT * FROM visual_bibles WHERE project_id = ? AND script_version_id = ? ORDER BY created_at DESC LIMIT 1'
+    : 'SELECT * FROM visual_bibles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1';
+  const row = scriptVersionId ? db.prepare(query).get(projectId, scriptVersionId) : db.prepare(query).get(projectId);
   return row ? normalizeBible(row) : null;
 }
 
@@ -589,28 +631,47 @@ export function getVisualBible(db, id) {
 }
 
 export function updateVisualBible(db, id, { content, revision, confirmed }) {
-  const result = db.prepare(`UPDATE visual_bibles SET content_json = COALESCE(?, content_json), confirmed = COALESCE(?, confirmed), revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`)
-    .run(content === undefined ? null : JSON.stringify(content), confirmed === undefined ? null : (confirmed ? 1 : 0), now(), id, revision);
+  const current = getVisualBible(db, id);
+  if (!current) return null;
+  const normalized = content === undefined ? current.content : normalizeVisualBibleContent(content);
+  const timestamp = now();
+  const nextConfirmed = confirmed === undefined ? current.confirmed : Boolean(confirmed);
+  const status = nextConfirmed ? 'confirmed' : 'draft';
+  const result = db.prepare(`UPDATE visual_bibles SET content_json = ?, content_hash = ?, status = ?, confirmed = ?, confirmed_at = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`)
+    .run(JSON.stringify(normalized), visualBibleContentHash(normalized), status, nextConfirmed ? 1 : 0, nextConfirmed ? (current.confirmed_at || timestamp) : null, timestamp, id, revision);
   return result.changes ? getVisualBible(db, id) : null;
 }
 
-function normalizeBible(row) { return { ...row, content: JSON.parse(row.content_json || '{}'), confirmed: Boolean(row.confirmed) }; }
-
+function normalizeBible(row) {
+  const content = normalizeVisualBibleContent(JSON.parse(row.content_json || '{}'));
+  return {
+    ...row,
+    content,
+    content_hash: row.content_hash || visualBibleContentHash(content),
+    status: row.status || (row.confirmed ? 'confirmed' : 'draft'),
+    confirmed: Boolean(row.confirmed),
+  };
+}
 export function createSegmentShot(db, shot) {
   const timestamp = now();
   db.prepare(`INSERT INTO segment_shots(
     id, segment_version_id, sequence, prompt_zh, prompt_en, duration_ms, status, provider, model, provider_job_id,
     storyboard_plan_id, beat_id, plot_text, shot_size, camera_movement, camera_angle, focal_length_mm,
-    composition, narrative_purpose, selection_reason, evidence_ids_json, generation_spec_json, created_at, updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    composition, narrative_purpose, selection_reason, evidence_ids_json, generation_spec_json,
+    keyframe_prompt_zh, keyframe_prompt_en, keyframe_status, selected_keyframe_asset_id,
+    selected_endframe_asset_id, generation_signature, keyframe_signature, motion_signature, created_at, updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(shot.id, shot.segmentVersionId, shot.sequence, shot.promptZh || '', shot.promptEn || '', shot.durationMs || 0,
       shot.status || 'pending', shot.provider || null, shot.model || null, shot.providerJobId || null,
       shot.storyboardPlanId || null, shot.beatId || null, shot.plot || '', shot.shotSize || '', shot.movement || '',
       shot.angle || '', shot.focalLengthMm || null, shot.composition || '', shot.purpose || '', shot.selectionReason || '',
-      JSON.stringify(shot.evidenceIds || []), JSON.stringify(shot.generationSpec || {}), timestamp, timestamp);
+      JSON.stringify(shot.evidenceIds || []), JSON.stringify(shot.generationSpec || {}),
+      shot.keyframePromptZh || shot.generationSpec?.keyframePrompt || '', shot.keyframePromptEn || '',
+      shot.keyframeStatus || (shot.selectedKeyframeAssetId ? 'confirmed' : 'missing'), shot.selectedKeyframeAssetId || null,
+      shot.selectedEndframeAssetId || null, shot.generationSignature || null, shot.keyframeSignature || null,
+      shot.motionSignature || null, timestamp, timestamp);
   return getSegmentShot(db, shot.id);
 }
-
 export function getSegmentShot(db, id) {
   const row = db.prepare('SELECT * FROM segment_shots WHERE id = ?').get(id);
   return row ? normalizeShot(row) : null;
@@ -629,7 +690,7 @@ function normalizeShot(row) {
 }
 
 export function updateSegmentShot(db, id, fields) {
-  const allowed = ['prompt_zh', 'prompt_en', 'duration_ms', 'status', 'provider', 'model', 'provider_job_id', 'plot_text', 'shot_size', 'camera_movement', 'camera_angle', 'focal_length_mm', 'composition', 'narrative_purpose', 'selection_reason', 'evidence_ids_json', 'generation_spec_json', 'updated_at'];
+  const allowed = ['prompt_zh', 'prompt_en', 'duration_ms', 'status', 'provider', 'model', 'provider_job_id', 'plot_text', 'shot_size', 'camera_movement', 'camera_angle', 'focal_length_mm', 'composition', 'narrative_purpose', 'selection_reason', 'evidence_ids_json', 'generation_spec_json', 'keyframe_prompt_zh', 'keyframe_prompt_en', 'keyframe_status', 'selected_keyframe_asset_id', 'selected_endframe_asset_id', 'generation_signature', 'keyframe_signature', 'motion_signature', 'updated_at'];
   const entries = Object.entries(fields).filter(([key, value]) => allowed.includes(key) && value !== undefined);
   if (!entries.length) return getSegmentShot(db, id);
   const assignments = entries.map(([key]) => `${key} = ?`).join(', ');
@@ -834,11 +895,12 @@ export function updateSegmentDuration(db, id, durationMs) {
 export function createMediaAsset(db, asset) {
   const timestamp = now();
   const metadataJson = asset.metadata ? JSON.stringify(asset.metadata) : null;
+  const generationSignature = asset.generationSignature || asset.generation_signature || asset.metadata?.generationSignature || null;
   db.prepare(`
     INSERT INTO media_assets(
       id, project_id, segment_version_id, shot_id, type, provider, model, object_key, metadata_json,
-      duration_ms, size_bytes, status, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      duration_ms, size_bytes, generation_signature, source_asset_id, status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     asset.id,
     asset.projectId,
@@ -851,6 +913,8 @@ export function createMediaAsset(db, asset) {
     metadataJson,
     asset.durationMs || 0,
     asset.sizeBytes || 0,
+    generationSignature,
+    asset.sourceAssetId || null,
     asset.status || 'ready',
     timestamp,
   );
@@ -858,7 +922,6 @@ export function createMediaAsset(db, asset) {
   appendGenerationMetadataLog(db, persisted);
   return persisted;
 }
-
 function appendGenerationMetadataLog(db, asset) {
   const logPath = metadataLogPaths.get(db);
   if (!logPath || !asset) return;
@@ -914,6 +977,15 @@ export function getMediaAsset(db, id) {
   return row ? normalizeAsset(row) : null;
 }
 
+export function updateMediaAsset(db, id, fields) {
+  const allowed = ['status', 'metadata_json', 'generation_signature', 'source_asset_id'];
+  const entries = Object.entries(fields).filter(([key, value]) => allowed.includes(key) && value !== undefined);
+  if (!entries.length) return getMediaAsset(db, id);
+  const assignments = entries.map(([key]) => `${key} = ?`).join(', ');
+  db.prepare(`UPDATE media_assets SET ${assignments} WHERE id = ?`).run(...entries.map(([, value]) => value), id);
+  return getMediaAsset(db, id);
+}
+
 function normalizeAsset(row) {
   return {
     ...row,
@@ -922,20 +994,52 @@ function normalizeAsset(row) {
     sizeBytes: row.size_bytes,
     shotId: row.shot_id,
     segmentVersionId: row.segment_version_id,
+    generationSignature: row.generation_signature || (row.metadata_json ? JSON.parse(row.metadata_json).generationSignature : null),
+    sourceAssetId: row.source_asset_id || null,
     metadata: row.metadata_json ? JSON.parse(row.metadata_json) : null,
   };
 }
 
-export function listMediaAssets(db, { projectId, segmentVersionId } = {}) {
-  if (segmentVersionId) {
-    return db.prepare('SELECT * FROM media_assets WHERE segment_version_id = ? ORDER BY created_at').all(segmentVersionId).map(normalizeAsset);
-  }
-  if (projectId) {
-    return db.prepare('SELECT * FROM media_assets WHERE project_id = ? ORDER BY created_at').all(projectId).map(normalizeAsset);
-  }
-  return [];
+export function listMediaAssets(db, { projectId, segmentVersionId, shotId, type, status } = {}) {
+  const conditions = [];
+  const values = [];
+  if (projectId) { conditions.push('project_id = ?'); values.push(projectId); }
+  if (segmentVersionId) { conditions.push('segment_version_id = ?'); values.push(segmentVersionId); }
+  if (shotId) { conditions.push('shot_id = ?'); values.push(shotId); }
+  if (type) { conditions.push('type = ?'); values.push(type); }
+  if (status) { conditions.push('status = ?'); values.push(status); }
+  const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
+  return db.prepare(`SELECT * FROM media_assets${where} ORDER BY created_at`).all(...values).map(normalizeAsset);
 }
 
+export function invalidateProjectVisualDependents(db, projectId, { includeReferences = false } = {}) {
+  const timestamp = now();
+  const allowedTypes = includeReferences
+    ? ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video']
+    : ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video'];
+  const placeholders = allowedTypes.map(() => '?').join(',');
+  const assets = db.prepare(`UPDATE media_assets SET status = 'stale' WHERE project_id = ? AND type IN (${placeholders}) AND status = 'ready'`).run(projectId, ...allowedTypes).changes;
+  const shots = db.prepare(`
+    UPDATE segment_shots
+    SET keyframe_status = CASE WHEN selected_keyframe_asset_id IS NULL THEN 'missing' ELSE 'stale' END,
+        updated_at = ?
+    WHERE segment_version_id IN (
+      SELECT sv.id FROM segment_versions sv
+      JOIN segments s ON s.id = sv.segment_id
+      WHERE s.project_id = ?
+    )
+  `).run(timestamp, projectId).changes;
+  return { assets, shots };
+}
+
+export function invalidateSelectedKeyframeDependents(db, shotId) {
+  const shot = getSegmentShot(db, shotId);
+  if (!shot) return 0;
+  const timestamp = now();
+  db.prepare("UPDATE media_assets SET status = 'stale' WHERE shot_id = ? AND type IN ('shot_video', 'video') AND status = 'ready'").run(shotId);
+  return db.prepare('UPDATE segment_shots SET motion_signature = NULL, generation_signature = NULL, status = ?, updated_at = ? WHERE id = ?')
+    .run(shot.keyframe_status === 'confirmed' ? 'planned' : 'pending', timestamp, shotId).changes;
+}
 export function createGenerationTask(db, task) {
   const timestamp = now();
   db.prepare(`
@@ -975,6 +1079,12 @@ export function getLatestGenerationTask(db, projectId) {
   return row ? normalizeGenerationTask(row) : null;
 }
 
+export function getLatestGenerationTaskForTypes(db, projectId, types = []) {
+  if (!types.length) return null;
+  const placeholders = types.map(() => '?').join(',');
+  const row = db.prepare(`SELECT * FROM generation_tasks WHERE project_id = ? AND type IN (${placeholders}) ORDER BY created_at DESC LIMIT 1`).get(projectId, ...types);
+  return row ? normalizeGenerationTask(row) : null;
+}
 export function getChildGenerationTask(db, parentTaskId, segmentId) {
   const row = db.prepare('SELECT * FROM generation_tasks WHERE parent_task_id = ? AND segment_id = ? ORDER BY created_at DESC LIMIT 1').get(parentTaskId, segmentId);
   return row ? normalizeGenerationTask(row) : null;

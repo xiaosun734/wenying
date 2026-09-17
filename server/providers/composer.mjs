@@ -1,25 +1,27 @@
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { probeMedia } from '../media-probe.mjs';
 
 export class FfmpegComposer {
-  constructor({ mediaRoot = './data/media', ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', fps = 24 } = {}) {
+  constructor({ mediaRoot = './data/media', ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', fontPath = '', fps = 24 } = {}) {
     this.provider = 'ffmpeg';
     this.model = 'ffmpeg-timeline-v2';
     this.mediaRoot = resolve(mediaRoot);
     this.ffmpegPath = ffmpegPath;
     this.ffprobePath = ffprobePath;
+    this.fontPath = fontPath ? resolve(fontPath) : '';
     this.fps = Math.max(1, Number(fps) || 24);
   }
 
-  async composeSegment({ project, segmentVersion, shots, transitions = [], audioAsset }) {
+  async composeSegment({ project, segmentVersion, shots, transitions = [], audioAsset, subtitleAsset = null }) {
     if (!shots.length) throw Object.assign(new Error('没有可合成的镜头素材'), { code: 'COMPOSER_SHOTS_EMPTY' });
     const objectKey = `projects/${safe(project.id)}/segments/${safe(segmentVersion.segment_id)}/versions/${safe(segmentVersion.id)}/video.mp4`;
     const output = resolve(this.mediaRoot, objectKey);
     await mkdir(dirname(output), { recursive: true });
     const segmentTransitions = transitionsForShots(shots, transitions);
-    await this.composeTimeline({ output, shots, transitions: segmentTransitions, audioAsset });
+    await this.composeTimeline({ output, shots, transitions: segmentTransitions, audioAsset, subtitleAsset });
     const probe = await probeMedia(output, { ffprobePath: this.ffprobePath });
     if (!probe.hasVideo) throw Object.assign(new Error('合成结果缺少视频流'), { code: 'COMPOSER_VIDEO_STREAM_MISSING' });
     if (audioAsset?.objectKey && !probe.hasAudio) throw Object.assign(new Error('合成结果缺少音轨'), { code: 'COMPOSER_AUDIO_STREAM_MISSING' });
@@ -39,7 +41,7 @@ export class FfmpegComposer {
     };
   }
 
-  async composeTimeline({ output, shots, transitions, audioAsset }) {
+  async composeTimeline({ output, shots, transitions, audioAsset, subtitleAsset = null }) {
     const args = ['-y'];
     shots.forEach(shot => args.push('-i', resolve(this.mediaRoot, shot.objectKey)));
     const audioKey = audioAsset?.objectKey || audioAsset?.object_key;
@@ -73,6 +75,28 @@ export class FfmpegComposer {
       previous = outputLabel;
     }
 
+    const overlays = collectTextOverlays(shots);
+    if (overlays.length) {
+      let label = previous;
+      overlays.forEach((overlay, index) => {
+        const nextLabel = `overlay${index}`;
+        const font = process.env.FFMPEG_FONT_PATH
+          ? `fontfile='${escapeFilterPath(process.env.FFMPEG_FONT_PATH)}':`
+          : '';
+        const x = overlay.position === 'center' ? '(w-text_w)/2' : 'w*0.68';
+        const y = overlay.position === 'center' ? '(h-text_h)/2' : 'h*0.13';
+        filters.push(`[${label}]drawtext=${font}text='${escapeDrawText(overlay.text)}':x=${x}:y=${y}:fontsize=h*0.055:fontcolor=white:borderw=3:bordercolor=black@0.85:box=1:boxcolor=black@0.28:boxborderw=12:enable='between(t,${overlay.startSeconds.toFixed(3)},${overlay.endSeconds.toFixed(3)})'[${nextLabel}]`);
+        label = nextLabel;
+      });
+      previous = label;
+    }
+    const subtitlePath = subtitleAsset?.objectKey ? resolve(this.mediaRoot, subtitleAsset.objectKey.replace(/\.json$/i, '.srt')) : null;
+    if (subtitlePath && existsSync(subtitlePath)) {
+      const nextLabel = 'subtitled';
+      const fontsDir = this.fontPath ? `:fontsdir='${escapeFilterPath(dirname(this.fontPath))}'` : '';
+      filters.push(`[${previous}]subtitles='${escapeFilterPath(subtitlePath)}'${fontsDir}:force_style='FontSize=18,Outline=2,Shadow=0,MarginV=36'[${nextLabel}]`);
+      previous = nextLabel;
+    }
     args.push('-filter_complex', filters.join(';'), '-map', `[${previous}]`);
     if (audioKey) args.push('-map', `${shots.length}:a:0`, '-c:a', 'aac', '-shortest');
     args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', String(this.fps), '-movflags', '+faststart', output);
@@ -89,6 +113,7 @@ export function createComposerProvider({ mediaRoot } = {}) {
     mediaRoot,
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+    fontPath: process.env.FFMPEG_FONT_PATH || '',
     fps: Number(process.env.COMFYUI_FPS || 24),
   });
 }
@@ -111,4 +136,32 @@ function run(command, args) {
     child.on('error', error => reject(Object.assign(new Error(`FFmpeg 启动失败: ${error.message}`), { code: 'FFMPEG_NOT_FOUND' })));
     child.on('close', code => code === 0 ? resolvePromise() : reject(Object.assign(new Error(`FFmpeg 合成失败: ${stderr.slice(-1200)}`), { code: 'FFMPEG_COMPOSE_FAILED' })));
   });
+}
+function collectTextOverlays(shots) {
+  const overlays = [];
+  let cursor = 0;
+  for (const shot of shots) {
+    const spec = shot.generation_spec || shot.generationSpec || {};
+    const elements = [
+      ...(Array.isArray(spec.postproductionElements) ? spec.postproductionElements : []),
+      ...(Array.isArray(shot.postproductionElements) ? shot.postproductionElements : []),
+    ];
+    const source = `${elements.join(' ')} ${shot.plot_text || shot.plot || ''}`;
+    const match = source.match(/(?:^|[^\d])(\d{1,2}\s*(?:[:：]\s*\d{2}|点\s*\d{1,2}\s*分?))(?!\d)/);
+    if (match) {
+      const text = match[1].replace(/\s+/g, '').replace('：', ':').replace('点', ':').replace(/分$/,'');
+      const duration = Math.max(0.04, Number(shot.duration_ms || 0) / 1000);
+      overlays.push({ text, startSeconds: cursor, endSeconds: Math.max(cursor + 0.04, cursor + duration), position: 'screen' });
+    }
+    cursor += Math.max(0.04, Number(shot.duration_ms || 0) / 1000);
+  }
+  return overlays;
+}
+
+function escapeDrawText(value) {
+  return String(value || '').replaceAll('\\', '\\\\').replaceAll(':', '\\:').replaceAll("'", "\\'");
+}
+
+function escapeFilterPath(value) {
+  return String(value || '').replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "\\'");
 }

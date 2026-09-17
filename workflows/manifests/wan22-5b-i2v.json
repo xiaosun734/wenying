@@ -1,0 +1,16 @@
+{
+  "profileId": "wan22-5b-i2v-draft",
+  "workflowVersion": 1,
+  "mode": "i2v",
+  "positivePrompt": { "node": "6", "field": "text" },
+  "negativePrompt": { "node": "7", "field": "text" },
+  "startImage": { "node": "59", "field": "image" },
+  "startImageConnection": { "node": "55", "input": "start_image", "source": ["59", 0] },
+  "width": { "node": "55", "field": "width" },
+  "height": { "node": "55", "field": "height" },
+  "frames": { "node": "55", "field": "length" },
+  "fps": { "node": "57", "field": "fps" },
+  "seedInputs": [{ "node": "3", "field": "seed", "increment": 0 }],
+  "outputNode": "58",
+  "requiresStartImage": true
+}
