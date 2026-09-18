@@ -4193,6 +4193,18 @@ svg {
 .visual-candidate.active { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent); }
 .visual-candidate img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; display: block; }
 .visual-candidate span { display: block; padding: 5px 3px; font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.visual-entity-editor { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 18px; }
+.visual-entity-editor .section-head h3 { margin: 0 0 4px; font-size: 15px; }
+.visual-entity-editor .section-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.visual-entity-editor-grid { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.visual-entity-editor-card { border: 1px solid var(--line); border-radius: 16px; background: var(--surface); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.visual-entity-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.visual-entity-editor-head strong { font-size: 14px; }
+.visual-entity-fields { display: flex; flex-direction: column; gap: 10px; }
+.visual-entity-fields label { display: grid; gap: 5px; }
+.visual-entity-fields label span { font-size: 11px; color: var(--muted-2); }
+.visual-entity-fields input { width: 100%; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); color: var(--text); padding: 8px 10px; font-size: 12px; }
+.visual-entity-fields input:focus { outline: none; border-color: var(--primary); }
 .keyframe-review-list { display: flex; flex-direction: column; gap: 18px; }
 .keyframe-review-card { display: grid; grid-template-columns: minmax(320px, .85fr) minmax(420px, 1.4fr); gap: 20px; border: 1px solid var(--line); border-radius: 18px; padding: 16px; background: var(--surface); }
 .keyframe-copy { display: flex; flex-direction: column; gap: 11px; min-width: 0; }

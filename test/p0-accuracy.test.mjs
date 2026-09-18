@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { buildGenerationSpec } from '../server/storyboard-task.mjs';
+import { buildGenerationSpec, validateShotSelection } from '../server/storyboard-task.mjs';
 import {
   closeDatabase,
   createMediaAsset,
@@ -14,10 +15,14 @@ import {
   createSegment,
   createSegmentShot,
   createSegmentVersion,
+  getMediaAsset,
+  getProject,
+  getSegmentVersion,
   openDatabase,
 } from '../server/db.mjs';
-import { distributeShotDurations } from '../server/media-task.mjs';
+import { MediaTaskRunner, distributeShotDurations, isGenerationSpecOutdated } from '../server/media-task.mjs';
 import { FfmpegComposer } from '../server/providers/composer.mjs';
+import { JsonSubtitleProvider } from '../server/providers/subtitles.mjs';
 import { probeMedia } from '../server/media-probe.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -48,6 +53,123 @@ test('builds an executable generation spec without leaking abstract narrative pu
   assert.match(spec.keyframePrompt, /静态关键帧/);
   assert.doesNotMatch(spec.motionPrompt, /列车/);
   assert.doesNotMatch(spec.motionPrompt, /叙事目的/);
+});
+
+test('repairs cross-beat evidence ids instead of failing the whole camera stage', () => {
+  const directorAnalysis = {
+    segments: [{ segmentId: 'seg-1', beats: [{ beatId: 'beat-01' }, { beatId: 'beat-02' }] }],
+  };
+  const retrievalContexts = [
+    { beatId: 'beat-01', evidence: [{ id: 'a-1' }, { id: 'a-2' }, { id: 'a-3' }] },
+    { beatId: 'beat-02', evidence: [{ id: 'b-1' }, { id: 'b-2' }] },
+  ];
+  const value = {
+    segments: [{
+      segmentId: 'seg-1',
+      selections: [
+        { beatId: 'beat-01', evidenceIds: ['a-1', 'b-1'] },
+        { beatId: 'beat-02', evidenceIds: ['b-2'] },
+      ],
+    }],
+  };
+  const repaired = validateShotSelection(value, directorAnalysis, retrievalContexts);
+  assert.deepEqual(repaired.value.segments[0].selections[0].evidenceIds, ['a-1']);
+  assert.deepEqual(repaired.evidenceRepairs, [{ beatId: 'beat-01', dropped: ['b-1'], filled: [] }]);
+
+  const noValidId = {
+    segments: [{
+      segmentId: 'seg-1',
+      selections: [
+        { beatId: 'beat-01', evidenceIds: ['made-up-id'] },
+        { beatId: 'beat-02', evidenceIds: ['b-1'] },
+      ],
+    }],
+  };
+  const filled = validateShotSelection(noValidId, directorAnalysis, retrievalContexts);
+  assert.deepEqual(filled.value.segments[0].selections[0].evidenceIds, ['a-1', 'a-2', 'a-3']);
+  assert.deepEqual(filled.evidenceRepairs[0].filled, ['a-1', 'a-2', 'a-3']);
+
+  process.env.RAG_EVIDENCE_STRICT = 'true';
+  try {
+    assert.throws(() => validateShotSelection(value, directorAnalysis, retrievalContexts), /无效的知识证据/);
+  } finally {
+    delete process.env.RAG_EVIDENCE_STRICT;
+  }
+});
+
+test('strips unspecified clauses and locks user-defined appearance into keyframe prompts', () => {
+  const bible = {
+    characters: [{
+      name: '沈砚',
+      appearance: '成年男性，面色苍白；具体年龄、发型与五官未交代。',
+      costume: '深色正式服装；具体款式未交代。',
+      age: '28 岁',
+      hair: '短黑发',
+      selectedReferenceAssetId: 'reference-asset-1',
+    }],
+    scenes: [],
+    style: 'cinematic',
+  };
+  const spec = buildGenerationSpec({ plot: '沈砚从站台上醒来。', shotSize: '中景', angle: '平视' }, {}, bible, {});
+  assert.doesNotMatch(spec.keyframePrompt, /未交代/);
+  assert.match(spec.keyframePrompt, /28 岁/);
+  assert.match(spec.keyframePrompt, /短黑发/);
+  assert.match(spec.keyframePrompt, /深色正式服装/);
+  assert.match(spec.keyframePrompt, /以已确认的角色参考图为准/);
+  assert.ok(spec.visualBibleHash, 'generation spec must carry the visual bible hash');
+});
+
+test('recompiles generation specs that were built before or from another visual bible', () => {
+  assert.equal(isGenerationSpecOutdated(null, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'old-hash' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'bible-hash' }, 'bible-hash'), false);
+});
+
+test('regenerates legacy empty subtitle assets so burn-in is not silently skipped', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'wenying-subtitles-'));
+  const mediaRoot = join(root, 'media');
+  await mkdir(mediaRoot, { recursive: true });
+  const db = await openDatabase(':memory:');
+  try {
+    createProject(db, { id: 'project-1', title: 'Test', genre: 'mystery', sourceText: null });
+    createScriptVersion(db, {
+      id: 'script-version-1', projectId: 'project-1', source: 'test', immutable: false,
+      promptVersion: 'test', provider: 'test', model: 'test', cleanedText: 'test',
+    });
+    createSegment(db, {
+      id: 'segment-1', projectId: 'project-1', scriptVersionId: 'script-version-1',
+      sequence: 1, title: 'Test', scriptText: '第一句。第二句。', summary: '', durationMs: 4000,
+    });
+    createSegmentVersion(db, {
+      id: 'segment-version-1', segmentId: 'segment-1', source: 'test', scriptText: '第一句。第二句。',
+      voiceId: 'steady', visualStyle: 'cinematic', durationMs: 4000,
+    });
+    createMediaAsset(db, {
+      id: 'subtitle-legacy', projectId: 'project-1', segmentVersionId: 'segment-version-1', type: 'subtitle',
+      provider: 'local', model: 'json-subtitles-v1', objectKey: 'legacy/subtitles.json',
+      durationMs: 4000, sizeBytes: 10, metadata: { format: 'json', cueCount: 0 },
+    });
+    const runner = new MediaTaskRunner({
+      db,
+      provider: { provider: 'fixture', model: 'fixture-media-v1' },
+      subtitleProvider: new JsonSubtitleProvider({ mediaRoot }),
+      logger: { error() {} },
+    });
+    const asset = await runner.ensureSubtitleAsset({
+      project: getProject(db, 'project-1'),
+      version: getSegmentVersion(db, 'segment-version-1'),
+      existing: getMediaAsset(db, 'subtitle-legacy'),
+    });
+    assert.notEqual(asset.id, 'subtitle-legacy');
+    assert.ok(Number(asset.metadata?.cueCount) > 0, 'new subtitle asset must carry cues');
+    assert.equal(getMediaAsset(db, 'subtitle-legacy').status, 'stale');
+    const srtPath = join(mediaRoot, (asset.metadata?.srtObjectKey || asset.objectKey).replace(/\.json$/i, '.srt'));
+    assert.equal(existsSync(srtPath), true);
+  } finally {
+    closeDatabase(db);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('redistributes shot durations to the measured audio duration exactly', () => {

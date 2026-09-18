@@ -7,6 +7,38 @@ export const REFERENCE_ASSET_TYPES = Object.freeze({
   prop: 'prop_reference',
 });
 
+/**
+ * Fields a user is allowed to lock down per visual entity. Character and scene
+ * appearance is a production decision: the image model must not invent it.
+ */
+export const EDITABLE_ENTITY_FIELDS = Object.freeze({
+  character: ['name', 'appearance', 'age', 'face', 'hair', 'body', 'costume'],
+  scene: ['name', 'description', 'layout', 'lighting', 'colorPalette'],
+  prop: ['name', 'description', 'material', 'state'],
+});
+
+/** Fields that change how an entity looks, so reference images must be redone. */
+export const ENTITY_APPEARANCE_FIELDS = Object.freeze({
+  character: ['appearance', 'age', 'face', 'hair', 'body', 'costume'],
+  scene: ['description', 'layout', 'lighting', 'colorPalette'],
+  prop: ['description', 'material', 'state'],
+});
+
+const UNSPECIFIED_CLAUSE = /未交代|未明确|尚未交代|未提及|不得虚构|无从确认|未给出|不作限定/;
+
+/**
+ * Removes clauses that only tell the model "this is unspecified". Those
+ * clauses are meaningful for the writers room but act as noise, or worse as an
+ * invitation to invent, for an image or video model.
+ */
+export function cleanEntityText(value) {
+  return String(value || '')
+    .split(/[；;。\n]+/)
+    .map(item => item.trim())
+    .filter(item => item && !UNSPECIFIED_CLAUSE.test(item))
+    .join('；');
+}
+
 const REFERENCE_VARIANTS = {
   character: [
     { id: 'front', label: '正面全身', instruction: '正面全身角色设定图，面部、发型、体型和服装完整可见，纯色摄影棚背景' },

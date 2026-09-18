@@ -60,6 +60,14 @@ Task polling resumes pending/running work after restart. Video generation requir
 pnpm test
 ```
 
+## 准确性验收
+
+```bash
+pnpm verify
+```
+
+只读检查参考资产 → 关键帧 → 图生视频 → 字幕/文字叠加 → 合成这条链路是否真正闭环（关键帧是否消费参考图、视频是否消费首帧、字幕是否烧录、时长是否与 TTS 对齐等），并列出必须人工确认的画面项。完整操作步骤见 [准确性验收指南.md](./准确性验收指南.md)。
+
 ## Database Admin
 
 Open `http://127.0.0.1:4173/admin` after starting the service to view and edit projects, segments, shots, media assets, tasks, and knowledge tables in SQLite. The admin page supports pagination, search, JSON field editing, and record deletion.

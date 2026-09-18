@@ -618,10 +618,16 @@ export function createVisualBible(db, bible) {
   return getVisualBible(db, bible.id);
 }
 export function getLatestVisualBible(db, projectId, scriptVersionId = null) {
-  const query = scriptVersionId
-    ? 'SELECT * FROM visual_bibles WHERE project_id = ? AND script_version_id = ? ORDER BY created_at DESC LIMIT 1'
-    : 'SELECT * FROM visual_bibles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1';
-  const row = scriptVersionId ? db.prepare(query).get(projectId, scriptVersionId) : db.prepare(query).get(projectId);
+  if (scriptVersionId) {
+    const bound = db.prepare('SELECT * FROM visual_bibles WHERE project_id = ? AND script_version_id = ? ORDER BY created_at DESC LIMIT 1').get(projectId, scriptVersionId);
+    if (bound) return normalizeBible(bound);
+    // Older projects stored a bible without binding it to a script version.
+    // Falling back to an unbound bible keeps those projects usable; a bible
+    // bound to a different script version is never reused.
+    const unbound = db.prepare('SELECT * FROM visual_bibles WHERE project_id = ? AND script_version_id IS NULL ORDER BY created_at DESC LIMIT 1').get(projectId);
+    return unbound ? normalizeBible(unbound) : null;
+  }
+  const row = db.prepare('SELECT * FROM visual_bibles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1').get(projectId);
   return row ? normalizeBible(row) : null;
 }
 
@@ -1030,6 +1036,28 @@ export function invalidateProjectVisualDependents(db, projectId, { includeRefere
     )
   `).run(timestamp, projectId).changes;
   return { assets, shots };
+}
+
+/**
+ * Marks the reference candidates of one visual entity stale. Used when the
+ * user rewrites a character/scene/prop appearance: the old reference images no
+ * longer describe the locked setting and must be regenerated and re-confirmed.
+ */
+export function invalidateEntityReferenceAssets(db, projectId, { entityId, kind } = {}) {
+  if (!entityId || !kind) return { assets: 0 };
+  const rows = db.prepare(`
+    SELECT id, metadata_json FROM media_assets
+    WHERE project_id = ? AND type IN ('character_reference', 'scene_reference', 'prop_reference')
+  `).all(projectId);
+  let assets = 0;
+  for (const row of rows) {
+    let metadata = {};
+    try { metadata = JSON.parse(row.metadata_json || '{}'); } catch { metadata = {}; }
+    if (metadata.entityId !== entityId || metadata.entityKind !== kind) continue;
+    db.prepare("UPDATE media_assets SET status = 'stale' WHERE id = ?").run(row.id);
+    assets += 1;
+  }
+  return { assets };
 }
 
 export function invalidateSelectedKeyframeDependents(db, shotId) {

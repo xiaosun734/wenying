@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -21,7 +21,7 @@ export class FfmpegComposer {
     const output = resolve(this.mediaRoot, objectKey);
     await mkdir(dirname(output), { recursive: true });
     const segmentTransitions = transitionsForShots(shots, transitions);
-    await this.composeTimeline({ output, shots, transitions: segmentTransitions, audioAsset, subtitleAsset });
+    const timeline = await this.composeTimeline({ output, shots, transitions: segmentTransitions, audioAsset, subtitleAsset });
     const probe = await probeMedia(output, { ffprobePath: this.ffprobePath });
     if (!probe.hasVideo) throw Object.assign(new Error('合成结果缺少视频流'), { code: 'COMPOSER_VIDEO_STREAM_MISSING' });
     if (audioAsset?.objectKey && !probe.hasAudio) throw Object.assign(new Error('合成结果缺少音轨'), { code: 'COMPOSER_AUDIO_STREAM_MISSING' });
@@ -37,6 +37,8 @@ export class FfmpegComposer {
         requestedDurationMs: targetDurationMs,
         actualDurationMs: probe.durationMs,
         probe,
+        textOverlays: timeline.overlays,
+        subtitles: timeline.subtitles,
       },
     };
   }
@@ -83,24 +85,39 @@ export class FfmpegComposer {
         const font = process.env.FFMPEG_FONT_PATH
           ? `fontfile='${escapeFilterPath(process.env.FFMPEG_FONT_PATH)}':`
           : '';
-        const x = overlay.position === 'center' ? '(w-text_w)/2' : 'w*0.68';
-        const y = overlay.position === 'center' ? '(h-text_h)/2' : 'h*0.13';
-        filters.push(`[${label}]drawtext=${font}text='${escapeDrawText(overlay.text)}':x=${x}:y=${y}:fontsize=h*0.055:fontcolor=white:borderw=3:bordercolor=black@0.85:box=1:boxcolor=black@0.28:boxborderw=12:enable='between(t,${overlay.startSeconds.toFixed(3)},${overlay.endSeconds.toFixed(3)})'[${nextLabel}]`);
+        const x = overlayPositionX(overlay);
+        const y = overlayPositionY(overlay);
+        const fontSize = process.env.FFMPEG_OVERLAY_FONT_RATIO || '0.055';
+        filters.push(`[${label}]drawtext=${font}text='${escapeDrawText(overlay.text)}':x=${x}:y=${y}:fontsize=h*${fontSize}:fontcolor=white:borderw=3:bordercolor=black@0.85:box=1:boxcolor=black@0.28:boxborderw=12:enable='between(t,${overlay.startSeconds.toFixed(3)},${overlay.endSeconds.toFixed(3)})'[${nextLabel}]`);
         label = nextLabel;
       });
       previous = label;
     }
+    const subtitleReport = { applied: false, cueCount: 0, reason: null };
     const subtitlePath = subtitleAsset?.objectKey ? resolve(this.mediaRoot, subtitleAsset.objectKey.replace(/\.json$/i, '.srt')) : null;
     if (subtitlePath && existsSync(subtitlePath)) {
-      const nextLabel = 'subtitled';
-      const fontsDir = this.fontPath ? `:fontsdir='${escapeFilterPath(dirname(this.fontPath))}'` : '';
-      filters.push(`[${previous}]subtitles='${escapeFilterPath(subtitlePath)}'${fontsDir}:force_style='FontSize=18,Outline=2,Shadow=0,MarginV=36'[${nextLabel}]`);
-      previous = nextLabel;
+      const cueCount = countSrtCues(subtitlePath);
+      if (cueCount > 0) {
+        const nextLabel = 'subtitled';
+        const fontsDir = this.fontPath ? `:fontsdir='${escapeFilterPath(dirname(this.fontPath))}'` : '';
+        filters.push(`[${previous}]subtitles='${escapeFilterPath(subtitlePath)}'${fontsDir}:force_style='FontSize=18,Outline=2,Shadow=0,MarginV=36'[${nextLabel}]`);
+        previous = nextLabel;
+        subtitleReport.applied = true;
+        subtitleReport.cueCount = cueCount;
+      } else {
+        subtitleReport.reason = 'srt-empty';
+      }
+    } else {
+      subtitleReport.reason = subtitleAsset?.objectKey ? 'srt-missing' : 'subtitle-asset-missing';
     }
     args.push('-filter_complex', filters.join(';'), '-map', `[${previous}]`);
     if (audioKey) args.push('-map', `${shots.length}:a:0`, '-c:a', 'aac', '-shortest');
     args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-r', String(this.fps), '-movflags', '+faststart', output);
     await run(this.ffmpegPath, args);
+    return {
+      overlays: overlays.map(item => ({ text: item.text, startSeconds: item.startSeconds, endSeconds: item.endSeconds })),
+      subtitles: subtitleReport,
+    };
   }
 }
 
@@ -151,11 +168,34 @@ function collectTextOverlays(shots) {
     if (match) {
       const text = match[1].replace(/\s+/g, '').replace('：', ':').replace('点', ':').replace(/分$/,'');
       const duration = Math.max(0.04, Number(shot.duration_ms || 0) / 1000);
-      overlays.push({ text, startSeconds: cursor, endSeconds: Math.max(cursor + 0.04, cursor + duration), position: 'screen' });
+      overlays.push({
+        text,
+        startSeconds: cursor,
+        endSeconds: Math.max(cursor + 0.04, cursor + duration),
+        position: spec.textOverlayPosition === 'center' ? 'center' : 'screen',
+      });
     }
     cursor += Math.max(0.04, Number(shot.duration_ms || 0) / 1000);
   }
   return overlays;
+}
+
+function overlayPositionX(overlay) {
+  if (process.env.FFMPEG_OVERLAY_X) return process.env.FFMPEG_OVERLAY_X;
+  return overlay.position === 'center' ? '(w-text_w)/2' : 'w*0.68';
+}
+
+function overlayPositionY(overlay) {
+  if (process.env.FFMPEG_OVERLAY_Y) return process.env.FFMPEG_OVERLAY_Y;
+  return overlay.position === 'center' ? '(h-text_h)/2' : 'h*0.13';
+}
+
+function countSrtCues(path) {
+  try {
+    return (readFileSync(path, 'utf8').match(/-->/g) || []).length;
+  } catch {
+    return 0;
+  }
 }
 
 function escapeDrawText(value) {

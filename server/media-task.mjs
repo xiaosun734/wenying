@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   createGenerationTask,
@@ -156,12 +157,11 @@ export class MediaTaskRunner {
     updateGenerationTask(this.db, task.id, { status: 'running', current_step: 'composing_segment', progress: 12, started_at: timestamp(), updated_at: timestamp() });
     const assets = listMediaAssets(this.db, { segmentVersionId: version.id });
     const audio = assetByType(assets, 'audio');
-    let subtitleAsset = assetByType(assets, 'subtitle');
-    if (!subtitleAsset) {
-      if (!this.subtitleProvider) throw Object.assign(new Error('Subtitle provider is not configured'), { code: 'SUBTITLE_NOT_CONFIGURED' });
-      const subtitle = await this.subtitleProvider.createSubtitles({ project, segmentVersion: version });
-      subtitleAsset = createMediaAsset(this.db, { id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'subtitle', provider: this.subtitleProvider.provider, model: this.subtitleProvider.model, objectKey: subtitle.objectKey, durationMs: subtitle.durationMs, sizeBytes: subtitle.sizeBytes, metadata: subtitle.metadata });
-    }
+    const subtitleAsset = await this.ensureSubtitleAsset({
+      project,
+      version,
+      existing: assetByType(assets, 'subtitle'),
+    });
     const shots = listSegmentShots(this.db, version.id);
     const shotAssets = shots.map(shot => ({ ...shot, objectKey: assets.find(asset => asset.shot_id === shot.id && asset.type === 'shot_video' && asset.status === 'ready')?.object_key })).filter(shot => shot.objectKey);
     if (!shotAssets.length) throw Object.assign(new Error('没有可合成的镜头视频'), { code: 'COMPOSER_SHOTS_EMPTY' });
@@ -239,26 +239,45 @@ export class MediaTaskRunner {
     const frameType = configuration.frameType === 'end' ? 'end' : 'start';
     const beat = plan?.director_analysis?.segments?.flatMap(item => item.beats || []).find(item => item.beatId === shot.beat_id);
     const editableShot = shotToEditable(shot);
-    const spec = shot.generation_spec?.version
-      ? shot.generation_spec
-      : buildGenerationSpec(editableShot, beat, bible.content, plan?.configuration || {});
+    const bibleHash = visualBibleContentHash(bible.content);
+    const storedSpec = shot.generation_spec?.version ? shot.generation_spec : null;
+    const specOutdated = isGenerationSpecOutdated(storedSpec, bibleHash);
+    const spec = specOutdated
+      ? buildGenerationSpec(editableShot, beat, bible.content, plan?.configuration || {})
+      : storedSpec;
     const prompt = configuration.promptOverride
       ? String(configuration.promptOverride)
       : frameType === 'end'
         ? `${compileKeyframePrompt(editableShot, bible.content, plan?.configuration || {}, spec)}；画面表现该镜头动作结束后的稳定状态：${spec.endState || '保持主体与场景连续'}`
         : compileKeyframePrompt(editableShot, bible.content, plan?.configuration || {}, spec);
+    if (specOutdated && !configuration.promptOverride) {
+      // The visual bible changed after the storyboard was built: keep the shot
+      // row in sync so the审核页面 shows the same prompt that was submitted.
+      updateSegmentShot(this.db, shot.id, {
+        generation_spec_json: JSON.stringify(spec),
+        keyframe_prompt_zh: prompt,
+        updated_at: timestamp(),
+      });
+    }
     const referenceAssetIds = uniqueValues([...(spec.referenceAssetIds || []), ...selectedBibleReferenceIds(bible.content)]);
     const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
-    const primaryReference = selectPrimaryReferenceAsset(this.db, project.id, referenceAssetIds, /沈砚/.test(String(spec.visibleSubject || shot.plot_text || '')));
+    const preferCharacter = Boolean(String(spec.visibleSubject || '').trim());
+    const primaryReference = selectPrimaryReferenceAsset(this.db, project.id, referenceAssetIds, preferCharacter);
     const referenceImagePath = primaryReference && this.provider.mediaRoot ? resolve(this.provider.mediaRoot, primaryReference.object_key) : null;
-    const bibleHash = visualBibleContentHash(bible.content);
+    const referenceRequired = this.keyframeReferenceRequired();
+    if (referenceRequired && !referenceImagePath) {
+      throw Object.assign(
+        new Error('关键帧生成需要已确认的角色或场景参考图，但当前镜头没有可用参考资产。请先在“视觉资产”中锁定主参考图。'),
+        { code: 'KEYFRAME_REFERENCE_MISSING' },
+      );
+    }
     const seedList = [];
     for (let index = 0; index < count; index += 1) {
       const seed = Number.isInteger(Number(configuration.seed)) ? Number(configuration.seed) + index : undefined;
       const signature = buildGenerationSignature({
         kind: 'keyframe', frameType, shotId: shot.id, scriptVersionHash: plan?.script_version_id || null,
         generationSpecHash: buildGenerationSignature({ spec }), visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes,
-        promptCompilerVersion: 'keyframe-prompt-v1', prompt, workflowHash: this.provider.workflowHash || null,
+        promptCompilerVersion: 'keyframe-prompt-v2', prompt, workflowHash: this.provider.workflowHash || null,
         width: configuration.width || null, height: configuration.height || null, seedList: seed === undefined ? [] : [seed],
       });
       const image = await this.provider.generateImage({
@@ -271,13 +290,19 @@ export class MediaTaskRunner {
         referenceImagePath,
         metadata: { shotId: shot.id, frameType, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, generationSignature: signature },
       });
+      if (referenceRequired && !image.metadata?.startImage) {
+        throw Object.assign(
+          new Error('关键帧生成没有实际使用参考图，工作流已退化为文生图。请检查 COMFYUI_KEYFRAME_WORKFLOW_PATH、COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH 和 COMFYUI_KEYFRAME_USE_REFERENCE。'),
+          { code: 'KEYFRAME_REFERENCE_NOT_USED' },
+        );
+      }
       seedList.push(image.metadata?.seed ?? seed ?? null);
       createMediaAsset(this.db, {
         id: randomUUID(), projectId: project.id, segmentVersionId: shot.segment_version_id, shotId: shot.id,
         type: frameType === 'end' ? 'shot_endframe_candidate' : 'shot_keyframe_candidate',
         provider: this.provider.provider, model: this.provider.model, objectKey: image.objectKey,
         sizeBytes: image.sizeBytes, generationSignature: signature,
-        metadata: { ...image.metadata, shotId: shot.id, frameType, candidateIndex: index + 1, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, generationSignature: signature, selected: false },
+        metadata: { ...image.metadata, shotId: shot.id, frameType, candidateIndex: index + 1, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetIds, referenceAssetHashes: referenceHashes, primaryReferenceAssetId: primaryReference?.id || null, generationSignature: signature, selected: false },
       });
       updateGenerationTask(this.db, task.id, { progress: Math.round(((index + 1) / count) * 92), updated_at: timestamp() });
     }
@@ -292,6 +317,39 @@ export class MediaTaskRunner {
     if (typeof this.provider.generateImage !== 'function') {
       throw Object.assign(new Error('当前媒体 Provider 不支持关键帧图片生成'), { code: 'IMAGE_PROVIDER_NOT_CONFIGURED' });
     }
+  }
+
+  /**
+   * A keyframe must be conditioned on a locked reference image. The check is
+   * skipped for providers that have no keyframe img2img workflow configured
+   * (for example the fixture provider used by tests).
+   */
+  keyframeReferenceRequired() {
+    const raw = String(process.env.KEYFRAME_REFERENCE_REQUIRED ?? 'auto').trim().toLowerCase();
+    if (['false', 'off', '0', 'no'].includes(raw)) return false;
+    if (['true', 'on', '1', 'yes'].includes(raw)) return true;
+    return Boolean(this.provider?.keyframeWorkflowPath && this.provider?.mediaRoot);
+  }
+
+  /**
+   * Subtitle assets written before the cue-based generator existed carry
+   * cueCount 0 and have no .srt file, which silently disables subtitle
+   * burn-in during composition. Replace them instead of reusing them.
+   */
+  async ensureSubtitleAsset({ project, version, existing = null }) {
+    if (existing && subtitleAssetUsable(existing, this.subtitleProvider?.mediaRoot)) return existing;
+    if (!this.subtitleProvider) {
+      if (existing) return existing;
+      throw Object.assign(new Error('Subtitle provider is not configured'), { code: 'SUBTITLE_NOT_CONFIGURED' });
+    }
+    const subtitle = await this.subtitleProvider.createSubtitles({ project, segmentVersion: version });
+    if (existing) updateMediaAsset(this.db, existing.id, { status: 'stale' });
+    return createMediaAsset(this.db, {
+      id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'subtitle',
+      provider: this.subtitleProvider.provider, model: this.subtitleProvider.model,
+      objectKey: subtitle.objectKey, durationMs: subtitle.durationMs, sizeBytes: subtitle.sizeBytes,
+      metadata: subtitle.metadata,
+    });
   }
   ensureChildTask(parentTask, project, segment) {
     const existing = getChildGenerationTask(this.db, parentTask.id, segment.id);
@@ -408,15 +466,11 @@ export class MediaTaskRunner {
       updateGenerationTask(this.db, task.id, { current_step: 'generating_subtitles', progress: 74, updated_at: timestamp() });
       updateSegmentVersion(this.db, version.id, { status: 'generating_subtitles', updated_at: timestamp() });
       assets = listMediaAssets(this.db, { segmentVersionId: version.id });
-      if (!assetByType(assets, 'subtitle')) {
-        if (!this.subtitleProvider) throw Object.assign(new Error('Subtitle provider is not configured'), { code: 'SUBTITLE_NOT_CONFIGURED' });
-        const subtitle = await this.subtitleProvider.createSubtitles({ project, segmentVersion: { ...version, duration_ms: actualDurationMs } });
-        createMediaAsset(this.db, {
-          id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'subtitle',
-          provider: this.subtitleProvider.provider, model: this.subtitleProvider.model, objectKey: subtitle.objectKey,
-          durationMs: subtitle.durationMs, sizeBytes: subtitle.sizeBytes, metadata: subtitle.metadata,
-        });
-      }
+      await this.ensureSubtitleAsset({
+        project,
+        version: { ...version, duration_ms: actualDurationMs },
+        existing: assetByType(assets, 'subtitle'),
+      });
 
       updateGenerationTask(this.db, task.id, { current_step: 'composing_segment', progress: 82, updated_at: timestamp() });
       const allAssets = listMediaAssets(this.db, { segmentVersionId: version.id });
@@ -527,6 +581,17 @@ export class MediaTaskRunner {
   }
 }
 
+/**
+ * A stored generation spec is only reusable while it was built from the same
+ * visual bible. Specs written before visualBibleHash existed are outdated too,
+ * so the first run after a visual-settings change always recompiles.
+ */
+export function isGenerationSpecOutdated(spec, bibleHash) {
+  if (!spec || !spec.version) return true;
+  if (!spec.visualBibleHash) return true;
+  return spec.visualBibleHash !== bibleHash;
+}
+
 export function distributeShotDurations(totalMs, shots) {
   const total = Math.max(1, Math.round(Number(totalMs) || 1));
   const weights = shots.map(shot => Math.max(1, Number(shot.duration_ms || shot.durationMs || 1)));
@@ -584,6 +649,13 @@ function selectedReferenceHashes(db, projectId, assetIds) {
 
 function safePart(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+function subtitleAssetUsable(asset, mediaRoot) {
+  if (!asset || asset.status !== 'ready') return false;
+  if (Number(asset.metadata?.cueCount || 0) <= 0) return false;
+  const srtKey = asset.metadata?.srtObjectKey || String(asset.object_key || '').replace(/\.json$/i, '.srt');
+  if (!srtKey || !mediaRoot) return true;
+  return existsSync(resolve(mediaRoot, srtKey));
 }
 function selectPrimaryReferenceAsset(db, projectId, assetIds, preferCharacter = true) {
   const ids = new Set((assetIds || []).filter(Boolean));

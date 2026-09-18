@@ -17,7 +17,7 @@ import {
   updateStoryboardTask,
 } from './db.mjs';
 import { RETRIEVAL_STRATEGY_VERSION } from './knowledge-retriever.mjs';
-import { normalizeVisualBibleContent, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
+import { cleanEntityText, normalizeVisualBibleContent, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
 
 const terminalStates = new Set(['succeeded', 'failed', 'canceled']);
 
@@ -125,16 +125,24 @@ export class StoryboardTaskRunner {
         }
 
         updateStoryboardTask(this.db, task.id, { current_step: 'selecting_shots', progress: 60, updated_at: timestamp() });
-        shotSelection = validateShotSelection(await this.provider.generateShotSelection({
+        const selectionValidation = validateShotSelection(await this.provider.generateShotSelection({
           directorAnalysis,
           retrievalContexts,
           visualBible: bible.content,
           configuration: plan.configuration,
           idempotencyKey: `${task.id}:camera`,
         }), directorAnalysis, retrievalContexts);
-        updateStoryboardPlan(this.db, plan.id, { shot_selection: shotSelection, knowledge_snapshot: this.retriever.snapshot(), updated_at: timestamp() });
+        shotSelection = selectionValidation.value;
+        if (selectionValidation.evidenceRepairs.length) {
+          this.logger.warn?.(`[storyboard-task] ${task.id} repaired evidence ids: ${JSON.stringify(selectionValidation.evidenceRepairs)}`);
+        }
+        updateStoryboardPlan(this.db, plan.id, {
+          shot_selection: shotSelection,
+          knowledge_snapshot: { ...this.retriever.snapshot(), evidenceRepairs: selectionValidation.evidenceRepairs },
+          updated_at: timestamp(),
+        });
       } else {
-        shotSelection = validateShotSelection(shotSelection, directorAnalysis);
+        shotSelection = validateShotSelection(shotSelection, directorAnalysis).value;
       }
 
       updateStoryboardTask(this.db, task.id, { current_step: 'building_storyboard', progress: 78, updated_at: timestamp() });
@@ -266,24 +274,27 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const postproductionElements = unique([...(beat?.postproductionElements || []), ...inferPostproductionElements(plot)]);
   const sceneDescription = scenes.map(scene => [
     scene.name,
-    sanitizeReferenceDescription(scene.description, mustNotShow, audioOnlyEvents, `${plot} ${visibleAction}`),
-    scene.layout ? `空间方向：${scene.layout}` : '',
-    scene.lighting ? `光线：${scene.lighting}` : '',
-    scene.colorPalette ? `色板：${scene.colorPalette}` : '',
+    sanitizeReferenceDescription(cleanEntityText(scene.description), mustNotShow, audioOnlyEvents, `${plot} ${visibleAction}`),
+    scene.layout ? `空间方向：${cleanEntityText(scene.layout)}` : '',
+    scene.lighting ? `光线：${cleanEntityText(scene.lighting)}` : '',
+    scene.colorPalette ? `色板：${cleanEntityText(scene.colorPalette)}` : '',
+    scene.selectedReferenceAssetId ? `以已确认的场景母版参考图为准，空间结构、陈设位置和光线不得改变` : '',
   ].filter(Boolean).join('：')).join('；');
   const characterIdentity = characters.map(character => [
     character.name,
-    character.age ? `年龄${character.age}` : '',
-    character.face || character.appearance,
-    character.hair,
-    character.body,
-    character.costume,
+    character.age ? `年龄${cleanEntityText(character.age)}` : '',
+    cleanEntityText(character.face),
+    cleanEntityText(character.appearance) !== cleanEntityText(character.face) ? cleanEntityText(character.appearance) : '',
+    cleanEntityText(character.hair) ? `发型发色：${cleanEntityText(character.hair)}` : '',
+    cleanEntityText(character.body) ? `身高体型：${cleanEntityText(character.body)}` : '',
+    cleanEntityText(character.costume) ? `固定服装：${cleanEntityText(character.costume)}` : '',
+    character.selectedReferenceAssetId ? `以已确认的角色参考图为准，面部、发型、体型和服装保持一致` : '',
   ].filter(Boolean).join('，')).join('；');
   const propDescription = props.map(prop => [
     prop.name,
-    prop.description,
-    prop.material,
-    prop.state,
+    cleanEntityText(prop.description),
+    cleanEntityText(prop.material),
+    cleanEntityText(prop.state),
   ].filter(Boolean).join('，')).join('；');
   const keep = unique([
     ...characters.map(character => `${character.name}的身份、面部和服装`),
@@ -320,6 +331,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const sanitizedMotionPrompt = exactTextInPost ? replaceExactScreenText(motionPrompt) : motionPrompt;
   return {
     version: 'generation-spec-v2',
+    visualBibleHash: visualBibleContentHash(bible),
     plot,
     visibleSubject: characters.map(character => character.name).join('、'),
     visibleAction,
@@ -369,7 +381,7 @@ function validateDirectorAnalysis(value, segments) {
   return { ...value, segments: normalized };
 }
 
-function validateShotSelection(value, directorAnalysis, retrievalContexts = null) {
+export function validateShotSelection(value, directorAnalysis, retrievalContexts = null) {
   if (!Array.isArray(value?.segments)) throw invalid('镜头选择缺少 segments');
   const allowedShotSizes = new Set(['大远景', '远景', '全景', '中景', '近景', '特写', '大特写']);
   const normalized = value.segments.map(item => ({
@@ -385,20 +397,31 @@ function validateShotSelection(value, directorAnalysis, retrievalContexts = null
       transitionToNext: normalizeTransition(selection.transitionToNext),
     })) : [],
   }));
+  const evidenceRepairs = [];
+  const strictEvidence = ['true', '1', 'on', 'yes'].includes(String(process.env.RAG_EVIDENCE_STRICT || '').trim().toLowerCase());
   for (const segment of directorAnalysis.segments) {
     const selections = normalized.find(item => item.segmentId === segment.segmentId)?.selections || [];
     for (const beat of segment.beats) {
       const selection = selections.find(item => item.beatId === beat.beatId);
       if (!selection) throw invalid(`节拍 ${beat.beatId} 缺少镜头选择`);
-      if (retrievalContexts) {
-        const allowedEvidence = new Set(retrievalContexts.find(item => item.beatId === beat.beatId)?.evidence.map(item => item.id) || []);
-        if (!selection.evidenceIds.length || selection.evidenceIds.some(id => !allowedEvidence.has(id))) {
-          throw invalid(`节拍 ${beat.beatId} 引用了无效的知识证据`);
-        }
+      if (!retrievalContexts) continue;
+      const evidence = retrievalContexts.find(item => item.beatId === beat.beatId)?.evidence || [];
+      const allowedEvidence = new Set(evidence.map(item => item.id));
+      const valid = [...new Set(selection.evidenceIds.filter(id => allowedEvidence.has(id)))];
+      const dropped = [...new Set(selection.evidenceIds.filter(id => !allowedEvidence.has(id)))];
+      if (!dropped.length && valid.length) continue;
+      if (strictEvidence) {
+        throw invalid(`节拍 ${beat.beatId} 引用了无效的知识证据：${(dropped.length ? dropped : ['无']).join('、')}`);
       }
+      // 模型偶尔会把相邻节拍的 evidence id 串过来。丢弃非法 id，并在该节拍
+      // 一条合法引用都没有时补回它自己的 Top 召回，避免整条策划链失败，
+      // 同时保证最终落库的证据一定来自真实召回。
+      const filled = valid.length ? [] : evidence.slice(0, 3).map(item => item.id);
+      selection.evidenceIds = [...new Set([...valid, ...filled])];
+      evidenceRepairs.push({ beatId: beat.beatId, dropped, filled });
     }
   }
-  return { ...value, segments: normalized };
+  return { value: { ...value, segments: normalized }, evidenceRepairs };
 }
 
 function validateStoryboard(value, segments) {

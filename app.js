@@ -678,6 +678,27 @@ function storyboardStepLabel(step) {
   })[step] || '前期策划';
 }
 
+const ENTITY_EDIT_FIELDS = {
+  character: [['age', '年龄'], ['face', '面部与五官'], ['hair', '发型发色'], ['body', '身高体型'], ['costume', '固定服装'], ['appearance', '其他设定']],
+  scene: [['description', '空间描述'], ['layout', '空间方向与出入口'], ['lighting', '光源与照明'], ['colorPalette', '色板']],
+  prop: [['description', '外观'], ['material', '材质'], ['state', '关键状态']],
+};
+
+const ENTITY_FIELD_HINTS = {
+  age: '28 岁', face: '清瘦长脸，单眼皮，眉骨清晰', hair: '短黑发，额前少量碎发',
+  body: '身高约 180cm，偏瘦', costume: '黑色单排扣西装，白衬衫，无领带，黑色皮鞋',
+  appearance: '气质、配饰或其他固定特征', description: '空间、材质与氛围', layout: '隧道在左，电子屏在右上，立柱在中间',
+  lighting: '顶部旧日光灯，冷灰暗蓝', colorPalette: '冷灰、暗蓝、低饱和', material: '金属与玻璃', state: '表面磨损，屏幕轻微闪烁',
+};
+
+function visualEntitySettingsPanel(entities, bibleId) {
+  if (!bibleId || !entities.length) return '';
+  return `<div class="visual-entity-editor"><div class="section-head"><div><h3>角色与场景设定</h3><p>这些是制作决定，会写入参考图和关键帧提示词。填好后再生成参考图，人物才不会每镜换脸。</p></div></div><div class="visual-entity-editor-grid">${entities.map(entity => {
+    const fields = ENTITY_EDIT_FIELDS[entity.entityKind] || [];
+    return `<article class="visual-entity-editor-card" data-entity-card="${escapeHtml(entity.entityId)}"><div class="visual-entity-editor-head"><strong>${escapeHtml(entity.name || '未命名')}</strong><span class="tag">${entity.group}</span></div><div class="visual-entity-fields">${fields.map(([key, label]) => `<label><span>${label}</span><input data-entity-field="${key}" value="${escapeHtml(entity[key] || '')}" placeholder="${escapeHtml(ENTITY_FIELD_HINTS[key] || '')}"></label>`).join('')}</div><button class="btn btn-ghost btn-sm" data-action="save-visual-entity" data-bible-id="${escapeHtml(bibleId)}" data-entity-kind="${entity.entityKind}" data-entity-id="${escapeHtml(entity.entityId)}">${icon('check', 13)} 保存设定</button></article>`;
+  }).join('')}</div></div>`;
+}
+
 function shotReviewView() {
   const plan = state.storyboardPlan || {};
   const directorSegments = plan.directorAnalysis?.segments || [];
@@ -702,7 +723,7 @@ function shotReviewView() {
       const selected = state.referenceAssets.find(asset => asset.id === entity.selectedReferenceAssetId);
       const candidates = state.referenceAssets.filter(asset => asset.metadata?.entityId === entity.entityId && asset.metadata?.entityKind === entity.entityKind && asset.status === 'ready');
       return `<article class="visual-entity-card"><div class="visual-entity-head"><div><span class="tag">${entity.group}</span><h4>${escapeHtml(entity.name || '未命名')}</h4><p>${escapeHtml(entity.appearance || entity.description || entity.costume || '')}</p></div><span class="status-pill ${selected ? 'ready' : 'draft'}">${selected ? '已锁定' : '待确认'}</span></div>${selected?.url ? `<img class="visual-reference-main" src="${escapeHtml(selected.url)}" alt="${escapeHtml(entity.name)}参考图">` : '<div class="visual-reference-empty">尚未选择主参考图</div>'}<div class="visual-candidate-strip">${candidates.map(asset => `<button class="visual-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-reference-asset" data-asset-id="${escapeHtml(asset.id)}" title="${escapeHtml(asset.metadata?.variantLabel || '')}"><img src="${escapeHtml(asset.url)}" alt=""><span>${escapeHtml(asset.metadata?.variantLabel || '候选')}</span></button>`).join('')}</div><button class="btn btn-ghost btn-sm" data-action="generate-reference-assets" data-entity-kind="${entity.entityKind}" data-entity-id="${escapeHtml(entity.entityId)}" ${state.visualAssetTaskStatus === 'running' || state.visualAssetTaskStatus === 'pending' ? 'disabled' : ''}>${icon('spark', 13)} 生成 4 张参考候选</button></article>`;
-    }).join('')}</div>` : '<div class="empty-state">当前 Visual Bible 没有可资产化的人物、场景或道具。</div>';
+    }).join('')}</div>${visualEntitySettingsPanel(entities, state.visualBible?.id)}` : '<div class="empty-state">当前 Visual Bible 没有可资产化的人物、场景或道具。</div>';
   } else {
     content = `<div class="keyframe-review-list">${shots.map(shot => {
       const candidates = (shot.keyframeCandidates || []).filter(asset => asset.status === 'ready');
@@ -1083,6 +1104,29 @@ async function selectVisualAsset(assetId) {
   }
 }
 
+async function saveVisualEntity({ bibleId, entityKind, entityId }) {
+  if (!bibleId || !entityId) return;
+  const card = document.querySelector(`[data-entity-card="${CSS.escape(entityId)}"]`);
+  if (!card) return;
+  const body = { entityKind, revision: state.visualBible?.revision };
+  card.querySelectorAll('[data-entity-field]').forEach(input => { body[input.dataset.entityField] = input.value; });
+  try {
+    const payload = await apiRequest(`/visual-bibles/${bibleId}/entities/${encodeURIComponent(entityId)}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    });
+    state.visualBible = payload.visualBible;
+    const refreshed = await apiRequest(`/projects/${state.activeProjectId}`);
+    syncProjectState(refreshed);
+    render();
+    const referenceCount = payload.referenceInvalidated?.assets ?? 0;
+    showToast(referenceCount
+      ? `设定已保存：${referenceCount} 张旧参考图已失效，请重新生成参考图并重新确认关键帧。`
+      : '设定已保存，相关关键帧与视频已标记失效。');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
 async function saveKeyframePrompt(shotId) {
   const textarea = document.querySelector(`[data-keyframe-prompt-shot="${CSS.escape(shotId)}"]`);
   if (!textarea) return;
@@ -1436,6 +1480,9 @@ function handleAction(element) {
       break;
     case 'generate-reference-assets':
       void generateReferenceAssets(element.dataset.entityKind, element.dataset.entityId);
+      break;
+    case 'save-visual-entity':
+      void saveVisualEntity({ bibleId: element.dataset.bibleId, entityKind: element.dataset.entityKind, entityId: element.dataset.entityId });
       break;
     case 'select-reference-asset':
       void selectVisualAsset(element.dataset.assetId);

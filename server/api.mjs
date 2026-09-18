@@ -49,6 +49,7 @@ import {
   updateGenerationTask,
   updateMediaAsset,
   invalidateProjectVisualDependents,
+  invalidateEntityReferenceAssets,
   invalidateSelectedKeyframeDependents,
   updateSegmentShot,
   invalidateShotAssets,
@@ -62,7 +63,7 @@ import {
 import { auditText, cleanSourceText } from './safety.mjs';
 import { PROMPT_VERSION, DIRECTOR_PROMPT_VERSION, CAMERA_PROMPT_VERSION, STORYBOARD_PROMPT_VERSION } from './providers/openai-compatible.mjs';
 import { buildGenerationSpec, compileKeyframePrompt, compileMotionPrompt, compileVideoPrompt } from './storyboard-task.mjs';
-import { buildGenerationSignature, getVisualEntity, updateVisualEntity, visualBibleContentHash } from './visual-assets.mjs';
+import { EDITABLE_ENTITY_FIELDS, ENTITY_APPEARANCE_FIELDS, buildGenerationSignature, getVisualEntity, updateVisualEntity, visualBibleContentHash } from './visual-assets.mjs';
 import { AdminDbError, deleteAdminRow, getAdminOverview, listAdminRows, listAdminTables, updateAdminRow } from './admin-db.mjs';
 
 const JSON_LIMIT = 2 * 1024 * 1024;
@@ -689,6 +690,40 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         const updated = updateVisualBible(db, bible.id, { content: body.content || bible.content, confirmed: true, revision });
         if (!updated) throw new ApiError(409, 'REVISION_CONFLICT', '视觉设定已被其他页面修改');
         return ok(res, { visualBible: updated });
+      }
+
+      if (parts[0] === 'visual-bibles' && parts[1] && method === 'PATCH' && parts[2] === 'entities' && parts[3]) {
+        const bible = getVisualBible(db, parts[1]);
+        if (!bible) throw new ApiError(404, 'VISUAL_BIBLE_NOT_FOUND', '视觉设定不存在');
+        const body = await readJson(req);
+        const entityKind = ['character', 'scene', 'prop'].includes(body.entityKind) ? body.entityKind : '';
+        if (!entityKind) throw new ApiError(400, 'INVALID_ENTITY_KIND', '视觉实体类型无效');
+        const entity = getVisualEntity(bible.content, entityKind, parts[3]);
+        if (!entity) throw new ApiError(404, 'VISUAL_ENTITY_NOT_FOUND', '视觉实体不存在');
+        const patch = {};
+        for (const field of EDITABLE_ENTITY_FIELDS[entityKind]) {
+          if (body[field] === undefined) continue;
+          patch[field] = String(body[field] ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 800);
+        }
+        if (body.forbiddenElements !== undefined) {
+          const values = Array.isArray(body.forbiddenElements)
+            ? body.forbiddenElements
+            : String(body.forbiddenElements).split(/[，,、;；\n]/);
+          patch.forbiddenElements = values.map(item => String(item || '').trim()).filter(Boolean).slice(0, 20);
+        }
+        if (!Object.keys(patch).length) throw new ApiError(400, 'EMPTY_ENTITY_PATCH', '没有需要更新的字段');
+        const appearanceChanged = ENTITY_APPEARANCE_FIELDS[entityKind].some(field => patch[field] !== undefined);
+        let content = updateVisualEntity(bible.content, entityKind, parts[3], { ...patch, locked: true });
+        let referenceInvalidated = { assets: 0 };
+        if (appearanceChanged) {
+          // The locked reference image no longer matches the new setting.
+          content = updateVisualEntity(content, entityKind, parts[3], { selectedReferenceAssetId: null });
+          referenceInvalidated = invalidateEntityReferenceAssets(db, bible.project_id, { entityId: parts[3], kind: entityKind });
+        }
+        const updated = updateVisualBible(db, bible.id, { content, revision: Number(body.revision ?? bible.revision) });
+        if (!updated) throw new ApiError(409, 'REVISION_CONFLICT', '视觉设定已被其他页面修改');
+        const invalidated = invalidateProjectVisualDependents(db, bible.project_id);
+        return ok(res, { visualBible: updated, invalidated, referenceInvalidated, appearanceChanged });
       }
 
       if (parts[0] === 'script-tasks' && parts[1]) {

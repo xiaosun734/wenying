@@ -291,6 +291,48 @@ test('saves drafts with optimistic revisions and confirms an immutable snapshot'
   assert.equal(immutableUpdate.body.error.code, 'SCRIPT_VERSION_IMMUTABLE');
 });
 
+test('edits visual entity attributes and rebuilds the keyframe prompt from the new bible', async () => {
+  const { project } = await createReadyScript();
+  await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
+  const storyboard = await request(`/projects/${project.id}/storyboard-tasks`, { method: 'POST' });
+  const storyboardTask = await waitForStoryboardTask(storyboardRunner, storyboard.body.task.id);
+  assert.equal(storyboardTask.status, 'succeeded');
+
+  let state = (await request(`/projects/${project.id}`)).body;
+  const character = state.visualBible.content.characters[0];
+  const shot = state.segments[0].shots[0];
+  const patched = await request(`/visual-bibles/${state.visualBible.id}/entities/${character.entityId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      entityKind: 'character',
+      revision: state.visualBible.revision,
+      age: '28 岁',
+      hair: '短黑发',
+      costume: '黑色单排扣西装；具体款式未交代',
+    }),
+  });
+  assert.equal(patched.response.status, 200);
+  const updatedEntity = patched.body.visualBible.content.characters.find(item => item.entityId === character.entityId);
+  assert.equal(updatedEntity.age, '28 岁');
+  assert.equal(updatedEntity.locked, true);
+  assert.equal(patched.body.appearanceChanged, true);
+  assert.equal(updatedEntity.selectedReferenceAssetId, null);
+
+  const started = await request(`/shots/${shot.id}/keyframe-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `keyframe-attributes-${shot.id}` },
+    body: JSON.stringify({ count: 1, seed: 11 }),
+  });
+  assert.equal(started.response.status, 202);
+  const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
+  assert.equal(task.status, 'succeeded');
+
+  state = (await request(`/projects/${project.id}`)).body;
+  const refreshed = state.segments.flatMap(segment => segment.shots || []).find(item => item.id === shot.id);
+  assert.match(refreshed.keyframePromptZh, /黑色单排扣西装/);
+  assert.match(refreshed.keyframePromptZh, /28 岁/);
+  assert.doesNotMatch(refreshed.keyframePromptZh, /未交代/);
+});
+
 test('locks references, generates and confirms keyframes, then gates I2V generation', async () => {
   const { project } = await createReadyScript();
   await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
