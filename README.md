@@ -14,7 +14,9 @@ SQLite 数据默认写入 `data/wenying.sqlite`。数据目录和密钥文件不
 
 三层前期策划流水线：确认文案并选择视觉配置后，通过异步任务依次完成“导演分析 → RAG 知识检索 → 镜头选择 → 结构化分镜表”。分镜确认后，视频模型才会按镜头生成素材，再由 Composer 合成为带口播音轨的片段视频。内置知识库位于 `knowledge/`，覆盖镜头语言、构图、运镜焦段、转场和模型能力。默认 `COMPOSER_PROVIDER=ffmpeg`；配置 `COMPOSER_PROVIDER=ffmpeg` 和 `FFMPEG_PATH` 可启用本地 FFmpeg 合成及 `dissolve/fade` 转场。豆包 TTS 通过 `TTS_PROVIDER=doubao` 及 `DOUBAO_TTS_*` 环境变量启用。
 
-AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LLM_*_USER_PROMPT_TEMPLATE` 控制传给大语言模型的上下文模板，`VIDEO_*_PROMPT_TEMPLATE` 控制视频提示词模板，`COMFYUI_NEGATIVE_PROMPT` 控制 ComfyUI 负面提示词。模板支持 `{genre}`、`{sourceText}` 等占位符，换行使用 `\\n` 表示；修改后需要重启服务。
+创建作品时可填写可选的“背景设定”（最多 2,000 字），用于补充世界观、人物关系和前情。它会随项目保存，并注入到文案改写、视觉设定、导演分析、镜头选择、分镜和单镜头提示词六个环节，作为全片一致性的锚点。背景设定与原文共享 24 小时留存策略（`SOURCE_RETENTION_HOURS`），原文清理时会一并清空。
+
+AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LLM_*_USER_PROMPT_TEMPLATE` 控制传给大语言模型的上下文模板，`VIDEO_*_PROMPT_TEMPLATE` 控制视频提示词模板，`COMFYUI_NEGATIVE_PROMPT` 控制 ComfyUI 负面提示词。模板支持 `{genre}`、`{sourceText}`、`{background}` 等占位符，换行使用 `\\n` 表示；修改后需要重启服务。六个 `LLM_*_USER_PROMPT_TEMPLATE` 默认都已带上 `背景设定：{background}`，可在不改变代码的前提下调整该行文案或移除它。
 
 ## 文案接口
 

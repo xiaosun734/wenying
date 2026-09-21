@@ -1,10 +1,10 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+﻿import { appendFileSync, mkdirSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { normalizeVisualBibleContent, visualBibleContentHash } from './visual-assets.mjs';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 const now = () => new Date().toISOString();
 const metadataLogPaths = new WeakMap();
@@ -29,6 +29,7 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       genre TEXT NOT NULL,
+      background TEXT,
       source_text TEXT,
       copyright_confirmed INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'draft',
@@ -330,6 +331,9 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
     CREATE INDEX IF NOT EXISTS idx_export_tasks_status ON export_tasks(status);
   `);
   const projectColumns = db.prepare('PRAGMA table_info(projects)').all().map(column => column.name);
+  if (!projectColumns.includes('background')) {
+    db.exec('ALTER TABLE projects ADD COLUMN background TEXT');
+  }
   if (!projectColumns.includes('source_expires_at')) {
     db.exec('ALTER TABLE projects ADD COLUMN source_expires_at TEXT');
   }
@@ -401,12 +405,12 @@ export function transaction(db, fn) {
   }
 }
 
-export function createProject(db, { id, title, genre, sourceText, copyrightConfirmed, sourceExpiresAt = null }) {
+export function createProject(db, { id, title, genre, background = '', sourceText, copyrightConfirmed, sourceExpiresAt = null }) {
   const timestamp = now();
   db.prepare(`
-    INSERT INTO projects(id, title, genre, source_text, copyright_confirmed, status, source_expires_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)
-  `).run(id, title, genre, sourceText, copyrightConfirmed ? 1 : 0, sourceExpiresAt, timestamp, timestamp);
+    INSERT INTO projects(id, title, genre, background, source_text, copyright_confirmed, status, source_expires_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+  `).run(id, title, genre, background || null, sourceText, copyrightConfirmed ? 1 : 0, sourceExpiresAt, timestamp, timestamp);
   return getProject(db, id);
 }
 
@@ -420,7 +424,7 @@ export function listProjects(db) {
 }
 
 export function updateProject(db, id, fields) {
-  const allowed = ['status', 'draft_script_version_id', 'active_script_version_id', 'active_generation_task_id', 'active_storyboard_plan_id', 'source_text', 'source_expires_at', 'updated_at'];
+  const allowed = ['status', 'draft_script_version_id', 'active_script_version_id', 'active_generation_task_id', 'active_storyboard_plan_id', 'background', 'source_text', 'source_expires_at', 'updated_at'];
   const entries = Object.entries(fields).filter(([key, value]) => allowed.includes(key) && value !== undefined);
   if (!entries.length) return getProject(db, id);
   const assignments = entries.map(([key]) => `${key} = ?`).join(', ');
@@ -477,7 +481,7 @@ export function recoverRunningTasks(db) {
 export function clearExpiredSources(db) {
   const result = db.prepare(`
     UPDATE projects
-    SET source_text = NULL, source_expires_at = NULL, updated_at = ?
+    SET source_text = NULL, background = NULL, source_expires_at = NULL, updated_at = ?
     WHERE source_text IS NOT NULL AND source_expires_at IS NOT NULL AND source_expires_at <= ?
   `).run(now(), now());
   return result.changes;

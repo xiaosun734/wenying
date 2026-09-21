@@ -17,9 +17,33 @@ import {
   updateStoryboardTask,
 } from './db.mjs';
 import { RETRIEVAL_STRATEGY_VERSION } from './knowledge-retriever.mjs';
-import { cleanEntityText, normalizeVisualBibleContent, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
+import { characterSafeAppearance, cleanEntityText, normalizeVisualBibleContent, resolveVisualStyle, sceneSafeDescription, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
 
 const terminalStates = new Set(['succeeded', 'failed', 'canceled']);
+
+/**
+ * 快速验收模式：整条链路只跑少量镜头、每个镜头控制在几秒内，用于快速验证
+ * “参考资产 → 关键帧 → 图生视频 → 合成”是否成立。默认 1 个镜头、5 秒。
+ */
+export function acceptanceSettings(configuration = {}) {
+  if (!configuration?.acceptanceMode) return { enabled: false, shotLimit: 0, shotDurationMs: 0 };
+  return {
+    enabled: true,
+    shotLimit: Math.max(1, Math.min(6, Number(configuration.acceptanceShotLimit) || 1)),
+    shotDurationMs: Math.max(1000, Math.min(6000, Number(configuration.acceptanceShotDurationMs) || 5000)),
+  };
+}
+
+export function limitDirectorBeats(directorAnalysis, shotLimit) {
+  const limit = Math.max(1, Number(shotLimit) || 1);
+  return {
+    ...directorAnalysis,
+    segments: (directorAnalysis?.segments || []).map(segment => ({
+      ...segment,
+      beats: (segment.beats || []).slice(0, limit),
+    })),
+  };
+}
 
 export class StoryboardTaskRunner {
   constructor({ db, provider, retriever, logger = console }) {
@@ -51,6 +75,7 @@ export class StoryboardTaskRunner {
       updateStoryboardTask(this.db, task.id, { status: 'running', current_step: 'preparing', progress: 3, started_at: timestamp(), updated_at: timestamp() });
       updateStoryboardPlan(this.db, plan.id, { status: 'generating', updated_at: timestamp() });
       const segments = listSegments(this.db, plan.script_version_id);
+      const acceptance = acceptanceSettings(plan.configuration);
       const segmentInputs = segments.map(segment => ({
         id: segment.id,
         sequence: segment.sequence,
@@ -58,7 +83,9 @@ export class StoryboardTaskRunner {
         summary: segment.summary || '',
         scriptText: segment.script_text,
         durationMs: segment.duration_ms,
-        targetShotCount: Math.max(1, Math.ceil(segment.duration_ms / 5000)),
+        targetShotCount: acceptance.enabled
+          ? Math.min(acceptance.shotLimit, Math.max(1, Math.ceil(segment.duration_ms / 5000)))
+          : Math.max(1, Math.ceil(segment.duration_ms / 5000)),
       }));
       const sourceHash = buildGenerationSignature({
         kind: 'script-source',
@@ -66,16 +93,20 @@ export class StoryboardTaskRunner {
         source: segmentInputs.map(item => ({ id: item.id, sequence: item.sequence, scriptText: item.scriptText })),
       });
 
+      const background = String(project.background || '').trim();
+      const backgroundHash = buildGenerationSignature({ kind: 'project-background', background });
+
       updateStoryboardTask(this.db, task.id, { current_step: 'building_visual_bible', progress: 8, updated_at: timestamp() });
       let bible = getLatestVisualBible(this.db, project.id, plan.script_version_id);
-      if (!bible || bible.content?.visualStyle !== plan.configuration.visualStyle) {
+      if (!bible || bible.content?.visualStyle !== plan.configuration.visualStyle || bible.content?.backgroundHash !== backgroundHash) {
         const generatedContent = await this.provider.generateVisualBible({
           segments: segmentInputs,
+          background,
           genre: project.genre,
           visualStyle: plan.configuration.visualStyle,
           idempotencyKey: `${task.id}:visual-bible`,
         });
-        const content = { ...generatedContent, visualStyle: plan.configuration.visualStyle };
+        const content = { ...generatedContent, visualStyle: plan.configuration.visualStyle, backgroundHash };
         bible = createVisualBible(this.db, { id: randomUUID(), projectId: project.id, scriptVersionId: plan.script_version_id, sourceHash, content, confirmed: false });
       }
 
@@ -84,14 +115,19 @@ export class StoryboardTaskRunner {
         updateStoryboardTask(this.db, task.id, { current_step: 'analyzing_direction', progress: 20, updated_at: timestamp() });
         directorAnalysis = validateDirectorAnalysis(await this.provider.generateDirectorAnalysis({
           segments: segmentInputs,
+          background: project.background || '',
           genre: project.genre,
           configuration: plan.configuration,
           idempotencyKey: `${task.id}:director`,
         }), segmentInputs);
-        updateStoryboardPlan(this.db, plan.id, { director_analysis: directorAnalysis, updated_at: timestamp() });
       } else {
         directorAnalysis = validateDirectorAnalysis(directorAnalysis, segmentInputs);
       }
+      if (acceptance.enabled) {
+        // 验收模式下即使模型多给了节拍，也只保留前 N 个，保证只生成 1 个镜头。
+        directorAnalysis = limitDirectorBeats(directorAnalysis, acceptance.shotLimit);
+      }
+      updateStoryboardPlan(this.db, plan.id, { director_analysis: directorAnalysis, updated_at: timestamp() });
 
       let shotSelection = plan.shot_selection;
       if (task.from_layer !== 'storyboard' || !shotSelection) {
@@ -129,6 +165,7 @@ export class StoryboardTaskRunner {
           directorAnalysis,
           retrievalContexts,
           visualBible: bible.content,
+          background: project.background || '',
           configuration: plan.configuration,
           idempotencyKey: `${task.id}:camera`,
         }), directorAnalysis, retrievalContexts);
@@ -150,6 +187,7 @@ export class StoryboardTaskRunner {
         directorAnalysis,
         shotSelection,
         visualBible: bible.content,
+        background: project.background || '',
         configuration: plan.configuration,
         idempotencyKey: `${task.id}:storyboard`,
       }), segmentInputs);
@@ -164,7 +202,11 @@ export class StoryboardTaskRunner {
           promptText: '', voiceId: plan.configuration.voiceId, visualStyle: plan.configuration.visualStyle,
           durationMs: segment.duration_ms, storyboardPlanId: plan.id,
         });
-        const durations = distributeDurations(segment.duration_ms, storyboardSegment.shots);
+        const durations = distributeDurations(
+          segment.duration_ms,
+          storyboardSegment.shots,
+          acceptance.enabled ? acceptance.shotDurationMs : 0,
+        );
         for (let index = 0; index < storyboardSegment.shots.length; index += 1) {
           const shot = storyboardSegment.shots[index];
           const beat = directorAnalysis.segments
@@ -270,11 +312,15 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
     ...mustShow,
     ...(plot.includes('闪烁') ? ['闪烁'] : []),
   ]);
-  const style = bible.style || configuration.visualStyle || 'cinematic';
+  const style = resolveVisualStyle(bible, configuration);
   const postproductionElements = unique([...(beat?.postproductionElements || []), ...inferPostproductionElements(plot)]);
+  const characterNames = (bible.characters || []).map(item => item.name);
   const sceneDescription = scenes.map(scene => [
     scene.name,
-    sanitizeReferenceDescription(cleanEntityText(scene.description), mustNotShow, audioOnlyEvents, `${plot} ${visibleAction}`),
+    sanitizeReferenceDescription(
+      sceneSafeDescription(cleanEntityText(scene.description), { characterNames }),
+      mustNotShow, audioOnlyEvents, `${plot} ${visibleAction}`,
+    ),
     scene.layout ? `空间方向：${cleanEntityText(scene.layout)}` : '',
     scene.lighting ? `光线：${cleanEntityText(scene.lighting)}` : '',
     scene.colorPalette ? `色板：${cleanEntityText(scene.colorPalette)}` : '',
@@ -283,11 +329,12 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const characterIdentity = characters.map(character => [
     character.name,
     character.age ? `年龄${cleanEntityText(character.age)}` : '',
-    cleanEntityText(character.face),
-    cleanEntityText(character.appearance) !== cleanEntityText(character.face) ? cleanEntityText(character.appearance) : '',
+    characterSafeAppearance(cleanEntityText(character.face)),
+    characterSafeAppearance(cleanEntityText(character.appearance)) !== characterSafeAppearance(cleanEntityText(character.face))
+      ? characterSafeAppearance(cleanEntityText(character.appearance)) : '',
     cleanEntityText(character.hair) ? `发型发色：${cleanEntityText(character.hair)}` : '',
     cleanEntityText(character.body) ? `身高体型：${cleanEntityText(character.body)}` : '',
-    cleanEntityText(character.costume) ? `固定服装：${cleanEntityText(character.costume)}` : '',
+    characterSafeAppearance(cleanEntityText(character.costume)) ? `固定服装：${characterSafeAppearance(cleanEntityText(character.costume))}` : '',
     character.selectedReferenceAssetId ? `以已确认的角色参考图为准，面部、发型、体型和服装保持一致` : '',
   ].filter(Boolean).join('，')).join('；');
   const propDescription = props.map(prop => [
@@ -442,14 +489,14 @@ function validateStoryboard(value, segments) {
   return { ...value, segments: normalized };
 }
 
-function distributeDurations(totalMs, shots) {
+function distributeDurations(totalMs, shots, maxShotMs = 0) {
   const weights = shots.map(shot => Math.max(1, Number(shot.durationMs || 5000)));
   const totalWeight = weights.reduce((sum, value) => sum + value, 0);
   let used = 0;
   return weights.map((weight, index) => {
     const duration = index === weights.length - 1 ? totalMs - used : Math.max(1, Math.round(totalMs * weight / totalWeight));
     used += duration;
-    return duration;
+    return maxShotMs > 0 ? Math.max(1, Math.min(maxShotMs, duration)) : duration;
   });
 }
 

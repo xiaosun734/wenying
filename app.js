@@ -36,16 +36,21 @@ function icon(name, size = 17, stroke = 1.8) {
 }
 
 const sourceText = '';
+const backgroundText = '';
 
 const state = {
   view: 'dashboard',
   sourceText,
+  entryBackground: backgroundText,
   title: '夜行者',
   genre: '悬疑',
   copyrightConfirmed: true,
   selectedSegment: 0,
   selectedStyle: 'cinematic',
   selectedVoice: 'magnetic',
+  acceptanceMode: false,
+  acceptanceShotLimit: 1,
+  acceptanceShotDurationMs: 5000,
   draftDirty: false,
   editorDirty: false,
   playing: false,
@@ -183,6 +188,7 @@ function syncProjectState(payload) {
   saveSessionProjectId(project.id);
   state.title = project.title || state.title;
   state.genre = project.genre || state.genre;
+  if (typeof project.background === 'string') state.entryBackground = project.background;
   state.scriptVersionId = payload.version?.id || project.draftScriptVersionId || project.activeScriptVersionId || null;
   if (Array.isArray(payload.segments)) {
     state.segments = payload.segments.map(clientSegment);
@@ -623,7 +629,7 @@ function backRow(label = '返回工作台') {
 
 function createView() {
   const data = estimate();
-  return `<section class="page workflow-page">${backRow()}<div style="margin-bottom:27px"><div class="eyebrow">CREATE A NEW STORY</div><h1 class="workflow-title">新建作品</h1><p class="workflow-subtitle">先把故事交给我们，确认文案后再开始消耗视频额度。</p></div>${workflowSteps(1)}<div class="form-layout"><div class="panel pad"><div class="panel-heading"><div><h3>输入小说内容</h3><p>支持 1–30,000 字中文正文，测试阶段可使用短文本。</p></div><span class="status-pill draft">第 1 步</span></div><div class="field"><label class="field-label" for="project-title">作品名称 <small>1–50 个字符</small></label><input id="project-title" class="input" data-field="projectTitle" value="${escapeHtml(state.title)}" placeholder="例如：夜行者" maxlength="50" /></div><div class="field"><div class="field-label">选择题材 <small>影响文案节奏与画面风格</small></div><div class="genre-list">${['玄幻', '都市', '悬疑', '言情', '历史', '科幻', '其他'].map(g => `<button class="genre-chip ${state.genre === g ? 'active' : ''}" data-action="select-genre" data-genre="${g}">${g}</button>`).join('')}</div></div><div class="field"><label class="field-label" for="source-text">小说正文 <small>建议先粘贴一章</small></label><textarea id="source-text" class="textarea" data-field="sourceText" spellcheck="false" maxlength="30000">${escapeHtml(state.sourceText)}</textarea><div class="char-row ${data.chars >= 1 && data.chars <= 30000 ? 'valid' : 'warning'}"><span data-role="source-hint">${data.chars < 1 ? '正文不能为空' : data.chars > 30000 ? '正文不能超过 30,000 字' : '内容长度符合生成要求'}</span><span><b data-role="source-count">${data.chars.toLocaleString()}</b> / 30,000 字</span></div></div><label class="check-row"><input type="checkbox" data-field="copyrightConfirmed" ${state.copyrightConfirmed ? 'checked' : ''} /><span>我确认已获得相关内容的合法使用授权，并同意遵守 <a href="#" data-action="navigate" data-view="help">平台使用与版权规则</a>。</span></label></div><aside class="estimate-card"><h3>生成预估</h3><p>AI 会先为你改写解说文案，不消耗视频额度。</p><div class="estimate-grid"><div class="estimate-item"><span>预计片段</span><strong data-role="estimate-segments">${data.segments}<small> 段</small></strong></div><div class="estimate-item"><span>预计时长</span><strong data-role="estimate-duration">${formatDuration(data.seconds)}</strong></div><div class="estimate-item"><span>文案处理</span><strong style="color:#8fe0bf">免费</strong></div><div class="estimate-item"><span>视频额度</span><strong data-role="estimate-credits">约 ${data.credits}<small> 次</small></strong></div></div><div class="estimate-divider"></div><div class="estimate-notice">${icon('info', 14)}<span>视频会在你确认文案后生成。生成过程中可以离开页面，任务会继续运行。</span></div><button class="btn estimate-action" data-action="start-script" ${state.submitPending ? 'disabled' : ''}>${state.submitPending ? '正在创建任务…' : '开始生成解说文案'} ${icon('arrow', 14)}</button></aside></div></section>`;
+  return `<section class="page workflow-page">${backRow()}<div style="margin-bottom:27px"><div class="eyebrow">CREATE A NEW STORY</div><h1 class="workflow-title">新建作品</h1><p class="workflow-subtitle">先把故事交给我们，确认文案后再开始消耗视频额度。</p></div>${workflowSteps(1)}<div class="form-layout"><div class="panel pad"><div class="panel-heading"><div><h3>输入小说内容</h3><p>支持 1–30,000 字中文正文，测试阶段可使用短文本；背景设定可选，会注入到改写、视觉设定与分镜环节。</p></div><span class="status-pill draft">第 1 步</span></div><div class="field"><label class="field-label" for="project-title">作品名称 <small>1–50 个字符</small></label><input id="project-title" class="input" data-field="projectTitle" value="${escapeHtml(state.title)}" placeholder="例如：夜行者" maxlength="50" /></div><div class="field"><div class="field-label">选择题材 <small>影响文案节奏与画面风格</small></div><div class="genre-list">${['玄幻', '都市', '悬疑', '言情', '历史', '科幻', '其他'].map(g => `<button class="genre-chip ${state.genre === g ? 'active' : ''}" data-action="select-genre" data-genre="${g}">${g}</button>`).join('')}</div></div><div class="field"><label class="field-label" for="background">背景设定 <small>可选 · 1–2,000 字</small></label><textarea id="background" class="textarea textarea-compact" data-field="entryBackground" spellcheck="false" maxlength="2000" placeholder="补充世界观、人物关系与前情，例如：主角沈砚，28 岁刑警，左眉有旧疤；故事发生在常年阴雨的南方小城。">${escapeHtml(state.entryBackground)}</textarea><div class="char-row valid"><span data-role="background-hint">可选，用来锁定人物与世界观设定</span><span><b data-role="background-count">${Array.from(state.entryBackground).length.toLocaleString()}</b> / 2,000 字</span></div></div><div class="field"><label class="field-label" for="source-text">小说正文 <small>建议先粘贴一章</small></label><textarea id="source-text" class="textarea" data-field="sourceText" spellcheck="false" maxlength="30000">${escapeHtml(state.sourceText)}</textarea><div class="char-row ${data.chars >= 1 && data.chars <= 30000 ? 'valid' : 'warning'}"><span data-role="source-hint">${data.chars < 1 ? '正文不能为空' : data.chars > 30000 ? '正文不能超过 30,000 字' : '内容长度符合生成要求'}</span><span><b data-role="source-count">${data.chars.toLocaleString()}</b> / 30,000 字</span></div></div><label class="check-row"><input type="checkbox" data-field="copyrightConfirmed" ${state.copyrightConfirmed ? 'checked' : ''} /><span>我确认已获得相关内容的合法使用授权，并同意遵守 <a href="#" data-action="navigate" data-view="help">平台使用与版权规则</a>。</span></label></div><aside class="estimate-card"><h3>生成预估</h3><p>AI 会先为你改写解说文案，不消耗视频额度。</p><div class="estimate-grid"><div class="estimate-item"><span>预计片段</span><strong data-role="estimate-segments">${data.segments}<small> 段</small></strong></div><div class="estimate-item"><span>预计时长</span><strong data-role="estimate-duration">${formatDuration(data.seconds)}</strong></div><div class="estimate-item"><span>文案处理</span><strong style="color:#8fe0bf">免费</strong></div><div class="estimate-item"><span>视频额度</span><strong data-role="estimate-credits">约 ${data.credits}<small> 次</small></strong></div></div><div class="estimate-divider"></div><div class="estimate-notice">${icon('info', 14)}<span>视频会在你确认文案后生成。生成过程中可以离开页面，任务会继续运行。</span></div><button class="btn estimate-action" data-action="start-script" ${state.submitPending ? 'disabled' : ''}>${state.submitPending ? '正在创建任务…' : '开始生成解说文案'} ${icon('arrow', 14)}</button></aside></div></section>`;
 }
 
 function processingView() {
@@ -870,12 +876,40 @@ function currentView() {
 
 function render() {
   app.innerHTML = `<div class="app-shell">${sidebar()}<main class="main">${topbar()}${currentView()}</main></div>${exportModal()}`;
+  mountAcceptanceToggle();
+}
+
+/**
+ * 快速验收模式开关。挂在“开始前期策划”按钮上方，开启后每个片段只规划
+ * 1 个镜头、约 5 秒，用来快速验证 参考图 → 关键帧 → 图生视频 → 合成 整条链路。
+ */
+function mountAcceptanceToggle() {
+  if (state.view !== 'config') return;
+  const anchor = app.querySelector('[data-action="start-storyboard"]');
+  if (!anchor || app.querySelector('[data-role="acceptance-toggle"]')) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'acceptance-toggle';
+  wrapper.dataset.role = 'acceptance-toggle';
+  wrapper.innerHTML = `<label class="check-row" data-action="toggle-acceptance"><input type="checkbox" ${state.acceptanceMode ? 'checked' : ''} /><span>快速验收模式：每个片段只生成 ${state.acceptanceShotLimit} 个镜头 · 约 ${Math.round(state.acceptanceShotDurationMs / 1000)} 秒，用于快速跑通整条链路</span></label>`;
+  anchor.parentElement.insertBefore(wrapper, anchor);
 }
 
 function showToast(message, type = 'success') {
   clearTimeout(state.toastTimer);
   toastRoot.innerHTML = `<div class="toast ${type === 'error' ? 'error' : ''}">${icon(type === 'error' ? 'info' : 'check', 15, 2.3)}<span>${escapeHtml(message)}</span></div>`;
   state.toastTimer = setTimeout(() => { toastRoot.innerHTML = ''; }, 3200);
+}
+
+function updateBackgroundCount() {
+  const chars = Array.from(state.entryBackground).length;
+  const count = document.querySelector('[data-role="background-count"]');
+  const hint = document.querySelector('[data-role="background-hint"]');
+  if (count) count.textContent = chars.toLocaleString();
+  if (hint) {
+    hint.textContent = chars > 2000 ? '背景设定不能超过 2,000 字' : '可选，用来锁定人物与世界观设定';
+    hint.parentElement.classList.toggle('valid', chars <= 2000);
+    hint.parentElement.classList.toggle('warning', chars > 2000);
+  }
 }
 
 function updateCreateEstimate() {
@@ -912,6 +946,11 @@ async function startScriptProcessing() {        //创建项目并提交脚本处
     showToast('请选择小说题材。', 'error');
     return;
   }
+  const backgroundChars = Array.from(state.entryBackground.trim()).length;
+  if (backgroundChars > 2000) {
+    showToast('背景设定不能超过 2,000 字。', 'error');
+    return;
+  }
   if (!state.copyrightConfirmed) {
     showToast('请先确认你拥有内容的合法使用权。', 'error');
     return;
@@ -926,6 +965,7 @@ async function startScriptProcessing() {        //创建项目并提交脚本处
       body: JSON.stringify({
         title: state.title.trim(),
         genre: state.genre,
+        background: state.entryBackground.trim(),
         sourceText: state.sourceText,
         copyrightConfirmed: state.copyrightConfirmed,
       }),
@@ -996,7 +1036,12 @@ async function startStoryboardPlanning() {
     const payload = await apiRequest(`/projects/${state.activeProjectId}/storyboard-tasks`, {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
-      body: JSON.stringify({ visualStyle, voiceId: state.selectedVoice, ratio: state.exportRatio, platform: 'short-video' }),
+      body: JSON.stringify({
+        visualStyle, voiceId: state.selectedVoice, ratio: state.exportRatio, platform: 'short-video',
+        acceptanceMode: state.acceptanceMode,
+        acceptanceShotLimit: state.acceptanceShotLimit,
+        acceptanceShotDurationMs: state.acceptanceShotDurationMs,
+      }),
     });
     syncProjectState(payload);
     state.submitPending = false;
@@ -1415,6 +1460,7 @@ function handleAction(element) {
         state.title = '';
         state.genre = '';
         state.sourceText = '';
+        state.entryBackground = '';
         state.copyrightConfirmed = false;
         state.segments = [];
       }
@@ -1519,6 +1565,12 @@ function handleAction(element) {
     case 'start-storyboard':
       void startStoryboardPlanning();
       break;
+    case 'toggle-acceptance': {
+      state.acceptanceMode = !state.acceptanceMode;
+      const input = element.querySelector('input[type="checkbox"]');
+      if (input) input.checked = state.acceptanceMode;
+      break;
+    }
     case 'retry-storyboard':
       if (!state.storyboardTaskId || state.submitPending) break;
       state.submitPending = true;
@@ -1639,6 +1691,10 @@ app.addEventListener('input', event => {
   if (field === 'sourceText') {
     state.sourceText = event.target.value;
     updateCreateEstimate();
+  }
+  if (field === 'entryBackground') {
+    state.entryBackground = event.target.value;
+    updateBackgroundCount();
   }
   if (field === 'projectTitle') {
     state.title = event.target.value;

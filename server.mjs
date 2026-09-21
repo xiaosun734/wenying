@@ -56,6 +56,17 @@ const knowledgeRetriever = new KnowledgeRetriever({ db });
 const storyboardRunner = new StoryboardTaskRunner({ db, provider, retriever: knowledgeRetriever });
 storyboardRunner.recover(recoverRunningStoryboardTasks(db));
 const mediaProvider = createMediaProvider();
+
+// 启动自检：工作流与 manifest 必须配对且形态一致，配错要在服务日志里立刻可见，
+// 而不是等到生成关键帧或视频时才失败。
+for (const check of await mediaProvider.verifyWorkflows()) {
+  if (check.ok) {
+    const extra = check.declaredMode && check.declaredMode !== check.mode ? '（manifest 声明 ' + check.declaredMode + '）' : '';
+    console.log('ComfyUI ' + check.label + ' 工作流：' + check.mode + ' / ' + (check.profileId || '无 manifest') + extra);
+  } else {
+    console.error('ComfyUI ' + check.label + ' 工作流配置有误：' + (check.error?.message || '未知错误'));
+  }
+}
 const composer = createComposerProvider({ mediaRoot });
 const ttsProvider = createTtsProvider({ mediaRoot });
 const subtitleProvider = createSubtitleProvider({ mediaRoot });

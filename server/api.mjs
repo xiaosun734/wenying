@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import {
   createProject,
   createScriptVersion,
@@ -109,12 +109,20 @@ function requireString(value, field, { min = 1, max = 1000000 } = {}) {
   return value;
 }
 
+/** seed 未填 / 非法一律存成 null，由生成侧决定随机种子。 */
+function normalizeSeed(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : null;
+}
+
 function projectDto(project) {
   if (!project) return null;
   return {
     id: project.id,
     title: project.title,
     genre: project.genre,
+    background: project.background || '',
     status: project.status,
     copyrightConfirmed: Boolean(project.copyright_confirmed),
     activeScriptVersionId: project.active_script_version_id,
@@ -386,6 +394,29 @@ function keyframeRequirementEnabled(body = {}) {
   return String(process.env.KEYFRAME_REQUIRED || '').toLowerCase() === 'true';
 }
 
+/**
+ * 快速验收模式：只规划并生成少量镜头（默认 1 个、5 秒），用于快速验证整条链路。
+ * 关闭时返回空对象，因此可以安全地展开进任意 configuration。
+ */
+function acceptanceConfiguration(source = {}) {
+  if (!source?.acceptanceMode) return {};
+  return {
+    acceptanceMode: true,
+    acceptanceShotLimit: Math.max(1, Math.min(6, Number(source.acceptanceShotLimit) || 1)),
+    acceptanceShotDurationMs: Math.max(1000, Math.min(6000, Number(source.acceptanceShotDurationMs) || 5000)),
+  };
+}
+
+function mergeAcceptanceConfiguration(base = {}, body = {}) {
+  const merged = { ...base, ...acceptanceConfiguration({ ...base, ...body }) };
+  if (body.acceptanceMode === false) {
+    delete merged.acceptanceMode;
+    delete merged.acceptanceShotLimit;
+    delete merged.acceptanceShotDurationMs;
+  }
+  return merged;
+}
+
 function assertProductionKeyframes(db, plan, body = {}) {
   if (!keyframeRequirementEnabled(body)) return false;
   const missing = missingKeyframeShots(db, plan);
@@ -437,6 +468,8 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         const title = requireString(String(body.title || '').trim(), '作品名称', { max: 50 });
         const genre = requireString(body.genre || '', '题材', { max: 30 });
         if (!allowedGenres.has(genre)) throw new ApiError(400, 'INVALID_GENRE', '请选择有效题材');
+        if (body.background) requireString(body.background, '背景设定', { max: 2000 });
+        const background = body.background ? cleanSourceText(body.background) : '';
         requireString(body.sourceText || '', '正文', { max: 30000 });
         const sourceText = cleanSourceText(body.sourceText);
         if (!sourceText.trim()) throw new ApiError(400, 'INVALID_INPUT', '正文不能为空');
@@ -445,7 +478,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         if (!audit.ok) throw new ApiError(422, audit.code, audit.message);
         const retentionHours = Math.max(1, Number(process.env.SOURCE_RETENTION_HOURS || 24));
         const project = createProject(db, {
-          id: randomUUID(), title, genre, sourceText, copyrightConfirmed: true,
+          id: randomUUID(), title, genre, background, sourceText, copyrightConfirmed: true,
           sourceExpiresAt: new Date(Date.now() + retentionHours * 60 * 60 * 1000).toISOString(),
         });
         return ok(res, { project: projectDto(project) }, 201);
@@ -480,7 +513,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
             id: randomUUID(), projectId: project.id, type: 'reference_candidates',
             configuration: {
               entityKind, entityId, count, promptOverride: String(body.promptOverride || '').slice(0, 2000),
-              seed: body.seed === undefined ? null : Number(body.seed), visualBibleId: bible.id,
+              seed: normalizeSeed(body.seed), visualBibleId: bible.id,
               visualBibleHash: visualBibleContentHash(bible.content), width: body.width || null, height: body.height || null,
             },
             provider: mediaProvider.provider, model: mediaProvider.model, idempotencyKey,
@@ -575,6 +608,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
               subtitleStyle: String(body.subtitleStyle || 'basic-outline'),
               bgmPolicy: String(body.bgmPolicy || 'auto'),
               keyframeRequired,
+              ...acceptanceConfiguration(storyboardPlan.configuration || {}),
             },
             provider: mediaProvider.provider, model: mediaProvider.model, idempotencyKey,
           });
@@ -602,7 +636,10 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         if (active && ['pending', 'running'].includes(active.status)) return ok(res, { ...projectState(db, project.id), task: storyboardTaskDto(active) }, 202);
         const plan = createStoryboardPlan(db, {
           id: randomUUID(), projectId: project.id, scriptVersionId: project.active_script_version_id,
-          configuration: { visualStyle, voiceId, ratio, platform: String(body.platform || 'short-video'), mediaModel: mediaProvider.model },
+          configuration: {
+            visualStyle, voiceId, ratio, platform: String(body.platform || 'short-video'), mediaModel: mediaProvider.model,
+            ...acceptanceConfiguration(body),
+          },
           promptVersions: { director: DIRECTOR_PROMPT_VERSION, camera: CAMERA_PROMPT_VERSION, storyboard: STORYBOARD_PROMPT_VERSION },
           provider: provider.provider, model: provider.model,
         });
@@ -666,7 +703,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
           if (duplicate) return ok(res, { ...projectState(db, project.id), task: storyboardTaskDto(duplicate) }, 202);
           const nextPlan = createStoryboardPlan(db, {
             id: randomUUID(), projectId: project.id, scriptVersionId: plan.script_version_id, basePlanId: plan.id,
-            configuration: plan.configuration,
+            configuration: mergeAcceptanceConfiguration(plan.configuration, body),
             directorAnalysis: fromLayer === 'director' ? null : plan.director_analysis,
             shotSelection: fromLayer === 'storyboard' ? plan.shot_selection : null,
             knowledgeSnapshot: plan.knowledge_snapshot, promptVersions: plan.prompt_versions,
@@ -946,7 +983,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
           id: randomUUID(), projectId: project.id, type: 'keyframe_candidates',
           configuration: {
             shotId: shot.id, count, frameType, promptOverride: String(body.promptOverride || '').slice(0, 3000),
-            seed: body.seed === undefined ? null : Number(body.seed), visualBibleId: bible.id,
+            seed: normalizeSeed(body.seed), visualBibleId: bible.id,
             visualBibleHash: visualBibleContentHash(bible.content), width: body.width || null, height: body.height || null,
           },
           provider: mediaProvider.provider, model: mediaProvider.model, idempotencyKey,

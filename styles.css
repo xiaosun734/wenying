@@ -1452,6 +1452,11 @@ svg {
   line-height: 1.9;
 }
 
+/* 背景设定是可选补充项，比正文矮一些，避免挤压正文输入区。 */
+.textarea-compact {
+  min-height: 132px;
+}
+
 .input:hover,
 .textarea:hover,
 .select:hover {
@@ -4194,6 +4199,9 @@ svg {
 .visual-candidate img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; display: block; }
 .visual-candidate span { display: block; padding: 5px 3px; font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .visual-entity-editor { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 18px; }
+.acceptance-toggle { margin: 14px 0 10px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 12px; background: var(--canvas); }
+.acceptance-toggle .check-row { align-items: center; font-size: 11px; color: var(--muted); }
+.acceptance-toggle input { accent-color: var(--primary); }
 .visual-entity-editor .section-head h3 { margin: 0 0 4px; font-size: 15px; }
 .visual-entity-editor .section-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .visual-entity-editor-grid { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }

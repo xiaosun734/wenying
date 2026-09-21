@@ -1,11 +1,11 @@
 import { cleanGeneratedText } from '../safety.mjs';
 import { requiredPrompt, renderPrompt } from '../prompt-config.mjs';
 
-export const PROMPT_VERSION = 'rewrite-v1';
+export const PROMPT_VERSION = 'rewrite-v2';
 export const SHOT_PROMPT_VERSION = 'shot-prompt-v1';
-export const DIRECTOR_PROMPT_VERSION = 'director-analysis-v2';
-export const CAMERA_PROMPT_VERSION = 'shot-selection-rag-v1';
-export const STORYBOARD_PROMPT_VERSION = 'storyboard-v1';
+export const DIRECTOR_PROMPT_VERSION = 'director-analysis-v3';
+export const CAMERA_PROMPT_VERSION = 'shot-selection-rag-v2';
+export const STORYBOARD_PROMPT_VERSION = 'storyboard-v2';
 
 export class ProviderError extends Error {
   constructor(code, message, { retryable = false, status = 0 } = {}) {
@@ -43,12 +43,13 @@ export class OpenAICompatibleProvider {
     this.retryDelayMs = Math.max(0, Number(retryDelayMs || 0));
   }
 
-  async rewrite({ sourceText, genre, idempotencyKey }) {
+  async rewrite({ sourceText, background = '', genre, idempotencyKey }) {
     if (!this.apiKey) {
       throw new ProviderError('SCRIPT_PROVIDER_NOT_CONFIGURED', '文案服务尚未配置，请设置 LLM_API_KEY', { retryable: false });
     }
     const systemPrompt = requiredPrompt('LLM_REWRITE_SYSTEM_PROMPT');
     const userPrompt = renderPrompt(requiredPrompt('LLM_REWRITE_USER_PROMPT_TEMPLATE'), {
+      background,
       genre,
       idempotencyKey,
       sourceText,
@@ -75,8 +76,9 @@ export class OpenAICompatibleProvider {
     throw lastError;
   }
 
-  async generateShotPrompts({ scriptText, summary, genre, visualBible, count, idempotencyKey }) {
+  async generateShotPrompts({ scriptText, summary, background = '', genre, visualBible, count, idempotencyKey }) {
     const userPrompt = renderPrompt(requiredPrompt('LLM_SHOT_USER_PROMPT_TEMPLATE'), {
+      background,
       genre,
       count,
       visualBible: JSON.stringify(visualBible || {}),
@@ -87,8 +89,9 @@ export class OpenAICompatibleProvider {
     return this.requestStructured(requiredPrompt('LLM_SHOT_SYSTEM_PROMPT'), userPrompt, SHOT_PROMPT_VERSION);
   }
 
-  async generateVisualBible({ segments, genre, visualStyle, idempotencyKey }) {
+  async generateVisualBible({ segments, background = '', genre, visualStyle, idempotencyKey }) {
     const userPrompt = renderPrompt(requiredPrompt('LLM_VISUAL_BIBLE_USER_PROMPT_TEMPLATE'), {
+      background,
       genre,
       visualStyle,
       segments: JSON.stringify(segments),
@@ -97,8 +100,9 @@ export class OpenAICompatibleProvider {
     return this.requestStructured(requiredPrompt('LLM_VISUAL_BIBLE_SYSTEM_PROMPT'), userPrompt, 'visual-bible-v1');
   }
 
-  async generateDirectorAnalysis({ segments, genre, configuration, idempotencyKey }) {
+  async generateDirectorAnalysis({ segments, background = '', genre, configuration, idempotencyKey }) {
     const userPrompt = renderPrompt(requiredPrompt('LLM_DIRECTOR_USER_PROMPT_TEMPLATE'), {
+      background,
       genre,
       configuration: JSON.stringify(configuration || {}),
       segments: JSON.stringify(segments),
@@ -107,8 +111,9 @@ export class OpenAICompatibleProvider {
     return this.requestStructured(requiredPrompt('LLM_DIRECTOR_SYSTEM_PROMPT'), userPrompt, DIRECTOR_PROMPT_VERSION);
   }
 
-  async generateShotSelection({ directorAnalysis, retrievalContexts, visualBible, configuration, idempotencyKey }) {
+  async generateShotSelection({ directorAnalysis, retrievalContexts, visualBible, background = '', configuration, idempotencyKey }) {
     const userPrompt = renderPrompt(requiredPrompt('LLM_CAMERA_USER_PROMPT_TEMPLATE'), {
+      background,
       directorAnalysis: JSON.stringify(directorAnalysis),
       retrievalContexts: JSON.stringify(retrievalContexts),
       visualBible: JSON.stringify(visualBible || {}),
@@ -118,8 +123,9 @@ export class OpenAICompatibleProvider {
     return this.requestStructured(requiredPrompt('LLM_CAMERA_SYSTEM_PROMPT'), userPrompt, CAMERA_PROMPT_VERSION);
   }
 
-  async generateStoryboard({ directorAnalysis, shotSelection, visualBible, configuration, idempotencyKey }) {
+  async generateStoryboard({ directorAnalysis, shotSelection, visualBible, background = '', configuration, idempotencyKey }) {
     const userPrompt = renderPrompt(requiredPrompt('LLM_STORYBOARD_USER_PROMPT_TEMPLATE'), {
+      background,
       directorAnalysis: JSON.stringify(directorAnalysis),
       shotSelection: JSON.stringify(shotSelection),
       visualBible: JSON.stringify(visualBible || {}),

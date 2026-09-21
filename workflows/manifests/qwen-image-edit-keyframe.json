@@ -1,10 +1,10 @@
 {
-  "profileId": "krea2-keyframe-img2img",
+  "profileId": "qwen-image-edit-keyframe",
   "workflowVersion": 1,
   "mode": "i2i",
   "positivePrompt": {
     "node": "6",
-    "field": "text"
+    "field": "prompt"
   },
   "negativePrompt": {
     "node": "7",
@@ -14,6 +14,12 @@
     "node": "10",
     "field": "image"
   },
+  "referenceImages": [
+    {
+      "node": "11",
+      "field": "image"
+    }
+  ],
   "seedInputs": [
     {
       "node": "3",
@@ -24,6 +30,14 @@
   "denoise": {
     "node": "3",
     "field": "denoise"
+  },
+  "width": {
+    "node": "5",
+    "field": "width"
+  },
+  "height": {
+    "node": "5",
+    "field": "height"
   },
   "filenamePrefix": {
     "node": "9",

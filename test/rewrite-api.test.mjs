@@ -15,6 +15,7 @@ import { StoryboardTaskRunner, waitForStoryboardTask } from '../server/storyboar
 let db;
 let runner;
 let mediaRunner;
+let mediaProvider;
 let storyboardRunner;
 let textProvider;
 let server;
@@ -51,12 +52,34 @@ class FixtureTextProvider {
   }
 }
 
+class RecordingTextProvider extends FixtureTextProvider {
+  constructor() {
+    super();
+    this.calls = [];
+  }
+  __record(method, input) { this.calls.push({ method, input }); }
+  async rewrite(input) { this.__record('rewrite', input); return super.rewrite(input); }
+  async generateVisualBible(input) { this.__record('generateVisualBible', input); return super.generateVisualBible(input); }
+  async generateDirectorAnalysis(input) { this.__record('generateDirectorAnalysis', input); return super.generateDirectorAnalysis(input); }
+  async generateShotSelection(input) { this.__record('generateShotSelection', input); return super.generateShotSelection(input); }
+  async generateStoryboard(input) { this.__record('generateStoryboard', input); return super.generateStoryboard(input); }
+}
+
 class FixtureMediaProvider {
-  constructor() { this.provider = 'fixture'; this.model = 'fixture-media-v1'; this.videoCalls = []; }
-  async generateImage({ prompt, seed, filenamePrefix = 'image' }) {
+  constructor({ mediaRoot = null } = {}) {
+    this.provider = 'fixture';
+    this.model = 'fixture-media-v1';
+    this.videoCalls = [];
+    this.imageCalls = [];
+    this.mediaRoot = mediaRoot;
+  }
+  async generateImage(input) {
+    this.imageCalls.push(input);
+    const { prompt, seed, filenamePrefix = 'image' } = input;
+    const resolvedSeed = Number.isFinite(Number(seed)) ? Number(seed) : Math.floor(Math.random() * 2 ** 31);
     return {
-      objectKey: `fixture/images/${filenamePrefix}-${seed ?? 1}.png`, durationMs: 0, sizeBytes: 2048,
-      metadata: { fixture: true, prompt, seed: seed ?? 1, sha256: `fixture-${filenamePrefix}` },
+      objectKey: `fixture/images/${filenamePrefix}-${resolvedSeed}.png`, durationMs: 0, sizeBytes: 2048,
+      metadata: { fixture: true, prompt, seed: resolvedSeed, sha256: `fixture-${filenamePrefix}` },
     };
   }
   async generateVideo(input) {
@@ -72,8 +95,7 @@ beforeEach(async () => {
   await seedKnowledgeDirectory(db, resolve('knowledge'));
   textProvider = new FixtureTextProvider();
   runner = new RewriteTaskRunner({ db, provider: textProvider, logger: { error() {} } });
-  mediaRoot = await mkdtemp(join(tmpdir(), 'wenying-fixture-media-'));
-  const mediaProvider = new FixtureMediaProvider();
+  mediaRoot = await mkdtemp(join(tmpdir(), 'wenying-fixture-media-'));  mediaProvider = new FixtureMediaProvider({ mediaRoot });
   const subtitleProvider = new JsonSubtitleProvider({ mediaRoot });
   mediaRunner = new MediaTaskRunner({ db, provider: mediaProvider, subtitleProvider, textProvider, requireAudio: false, logger: { error() {} } });
   storyboardRunner = new StoryboardTaskRunner({ db, provider: textProvider, retriever: new KnowledgeRetriever({ db }), logger: { error() {} } });
@@ -208,6 +230,79 @@ test('keeps tiny test input to one segment and one shot', async () => {
   assert.equal(planned.body.segments[0].shots.length, 1);
 });
 
+test('carries the project background into every planning provider call', async () => {
+  const recording = new RecordingTextProvider();
+  runner.provider = recording;
+  storyboardRunner.provider = recording;
+  const background = '主角沈砚，28 岁刑警，左眉有旧疤；故事发生在常年阴雨的南方小城。';
+  const { body } = await request('/projects', {
+    method: 'POST',
+    body: JSON.stringify({ title: '背景设定', genre: '悬疑', background, sourceText: source(400), copyrightConfirmed: true }),
+  });
+  assert.equal(body.project.background, background);
+
+  const rewriteTask = await request(`/projects/${body.project.id}/script-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `background-rewrite-${body.project.id}` },
+  });
+  const rewritten = await waitForTask(runner, rewriteTask.body.task.id);
+  assert.equal(rewritten.status, 'succeeded');
+  const rewriteCall = recording.calls.find(call => call.method === 'rewrite');
+  assert.ok(rewriteCall, 'rewrite should have been called');
+  assert.equal(rewriteCall.input.background, background);
+
+  const confirmed = await request(`/projects/${body.project.id}/script/confirm`, { method: 'POST' });
+  assert.equal(confirmed.response.status, 200);
+  const storyboardTask = await request(`/projects/${body.project.id}/storyboard-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `background-storyboard-${body.project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', ratio: '9:16' }),
+  });
+  const planned = await waitForStoryboardTask(storyboardRunner, storyboardTask.body.task.id);
+  assert.equal(planned.status, 'succeeded');
+
+  const planning = recording.calls.filter(call => call.method !== 'rewrite');
+  for (const method of ['generateVisualBible', 'generateDirectorAnalysis', 'generateShotSelection', 'generateStoryboard']) {
+    const call = planning.find(item => item.method === method);
+    assert.ok(call, method + ' should have been called');
+    assert.equal(call.input.background, background, method + ' should receive the project background');
+  }
+  const state = await request(`/projects/${body.project.id}`);
+  assert.ok(state.body.visualBible.content.backgroundHash.length > 0);
+});
+
+test('regenerates the visual bible when the background changes', async () => {
+  const recording = new RecordingTextProvider();
+  runner.provider = recording;
+  storyboardRunner.provider = recording;
+  const { body } = await request('/projects', {
+    method: 'POST',
+    body: JSON.stringify({ title: '背景变更', genre: '悬疑', background: '旧背景', sourceText: source(300), copyrightConfirmed: true }),
+  });
+  const rewriteTask = await request(`/projects/${body.project.id}/script-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `background-change-rewrite-${body.project.id}` },
+  });
+  await waitForTask(runner, rewriteTask.body.task.id);
+  await request(`/projects/${body.project.id}/script/confirm`, { method: 'POST' });
+  const firstTask = await request(`/projects/${body.project.id}/storyboard-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `background-change-first-${body.project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', ratio: '9:16' }),
+  });
+  await waitForStoryboardTask(storyboardRunner, firstTask.body.task.id);
+  const firstBible = await request(`/projects/${body.project.id}`);
+  const firstHash = firstBible.body.visualBible.content.backgroundHash;
+
+  db.prepare('UPDATE projects SET background = ? WHERE id = ?').run('新背景', body.project.id);
+  const secondTask = await request(`/projects/${body.project.id}/storyboard-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `background-change-second-${body.project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', ratio: '9:16' }),
+  });
+  await waitForStoryboardTask(storyboardRunner, secondTask.body.task.id);
+  const secondBible = await request(`/projects/${body.project.id}`);
+  assert.notEqual(secondBible.body.visualBible.content.backgroundHash, firstHash);
+  const bibleCalls = recording.calls.filter(call => call.method === 'generateVisualBible');
+  assert.equal(bibleCalls.length, 2);
+  assert.equal(bibleCalls[1].input.background, '新背景');
+});
+
 test('regenerates a derived storyboard plan from a downstream layer', async () => {
   const { project } = await createReadyScript();
   await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
@@ -333,6 +428,55 @@ test('edits visual entity attributes and rebuilds the keyframe prompt from the n
   assert.doesNotMatch(refreshed.keyframePromptZh, /未交代/);
 });
 
+test('acceptance mode plans and renders a single short shot', async () => {
+  const { project } = await createReadyScript();
+  await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
+  const storyboard = await request(`/projects/${project.id}/storyboard-tasks`, {
+    method: 'POST',
+    body: JSON.stringify({
+      visualStyle: 'cinematic', voiceId: 'magnetic', ratio: '9:16',
+      acceptanceMode: true, acceptanceShotLimit: 1, acceptanceShotDurationMs: 4000,
+    }),
+  });
+  assert.equal(storyboard.response.status, 202);
+  const storyboardTask = await waitForStoryboardTask(storyboardRunner, storyboard.body.task.id);
+  assert.equal(storyboardTask.status, 'succeeded');
+
+  let state = (await request(`/projects/${project.id}`)).body;
+  assert.equal(state.storyboardPlan.configuration.acceptanceMode, true);
+  let shots = state.segments.flatMap(segment => segment.shots || []);
+  assert.equal(shots.length, 1, `acceptance mode must plan exactly one shot, got ${shots.length}`);
+  assert.equal(shots[0].durationMs, 4000);
+
+  await request(`/storyboard-plans/${state.storyboardPlan.id}/confirm`, { method: 'POST' });
+  for (const shot of shots) {
+    const started = await request(`/shots/${shot.id}/keyframe-tasks`, {
+      method: 'POST', headers: { 'idempotency-key': `acc-keyframe-${shot.id}` },
+      body: JSON.stringify({ count: 1, seed: 7 }),
+    });
+    assert.equal(started.response.status, 202);
+    const keyframeTask = await waitForGenerationTask(mediaRunner, started.body.task.id);
+    assert.equal(keyframeTask.status, 'succeeded');
+  }
+  state = (await request(`/projects/${project.id}`)).body;
+  shots = state.segments.flatMap(segment => segment.shots || []);
+  for (const shot of shots) {
+    const selected = await request(`/media-assets/${shot.keyframeCandidates[0].id}/select`, { method: 'POST', body: '{}' });
+    assert.equal(selected.response.status, 200);
+  }
+
+  const started = await request(`/projects/${project.id}/generation-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `acc-video-${project.id}` },
+    body: JSON.stringify({ visualStyle: 'cinematic', voiceId: 'magnetic', keyframeRequired: true }),
+  });
+  assert.equal(started.response.status, 202);
+  const generationTask = await waitForGenerationTask(mediaRunner, started.body.task.id);
+  assert.equal(generationTask.status, 'succeeded');
+
+  state = (await request(`/projects/${project.id}`)).body;
+  assert.ok(Number(state.segments[0].durationMs) <= 4000, `segment duration should follow the acceptance timeline, got ${state.segments[0].durationMs}`);
+});
+
 test('locks references, generates and confirms keyframes, then gates I2V generation', async () => {
   const { project } = await createReadyScript();
   await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
@@ -352,7 +496,7 @@ test('locks references, generates and confirms keyframes, then gates I2V generat
   assert.equal(referenceTask.status, 'succeeded');
   state = (await request(`/projects/${project.id}`)).body;
   assert.equal(state.referenceAssets.length, 2);
-  const selectedReference = state.referenceAssets.find(asset => asset.metadata?.variantId === 'front');
+  const selectedReference = state.referenceAssets.find(asset => asset.metadata?.variantId === 'three-view');
   const referenceSelection = await request(`/media-assets/${selectedReference.id}/select`, { method: 'POST', body: '{}' });
   assert.equal(referenceSelection.response.status, 200);
   assert.equal(referenceSelection.body.visualBible.content.characters[0].selectedReferenceAssetId, selectedReference.id);
@@ -485,4 +629,96 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   assert.equal(afterRegenerate.body.segments[0].shots[0].promptZh, '用户修改后的镜头提示词');
 
 
+});
+
+test('reference candidates get a fresh seed per candidate when no seed is pinned', async () => {
+  const { project } = await createReadyScript();
+  await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
+  const storyboard = await request(`/projects/${project.id}/storyboard-tasks`, { method: 'POST' });
+  assert.equal(storyboard.response.status, 202);
+  const storyboardTask = await waitForStoryboardTask(storyboardRunner, storyboard.body.task.id);
+  assert.equal(storyboardTask.status, 'succeeded');
+
+  let state = (await request(`/projects/${project.id}`)).body;
+  const character = state.visualBible.content.characters[0];
+  assert.ok(character?.entityId);
+
+  // 不传 seed：每个候选都应由 provider 随机取种（旧 bug 会固定成 0/1/2/3，重新生成几乎不变）
+  const randomBatch = await request(`/projects/${project.id}/reference-assets`, {
+    method: 'POST', headers: { 'idempotency-key': `reference-random-${project.id}` },
+    body: JSON.stringify({ entityKind: 'character', entityId: character.entityId, count: 4 }),
+  });
+  assert.equal(randomBatch.response.status, 202);
+  const randomTask = await waitForGenerationTask(mediaRunner, randomBatch.body.task.id);
+  assert.equal(randomTask.status, 'succeeded');
+  const randomSeeds = JSON.parse(randomTask.configuration_json).seedList;
+  assert.equal(randomSeeds.length, 4);
+  assert.equal(new Set(randomSeeds.map(String)).size, 4, `未指定 seed 时每个候选都要有自己的种子，实际 ${JSON.stringify(randomSeeds)}`);
+
+  state = (await request(`/projects/${project.id}`)).body;
+  const candidates = state.referenceAssets.filter(asset => asset.metadata?.entityId === character.entityId);
+  assert.equal(candidates.length, 4);
+  assert.equal(new Set(candidates.map(asset => asset.objectKey)).size, 4, '每个候选必须落到独立文件，不能互相覆盖');
+
+  // 显式传 seed：仍按候选递增，方便复现某一版
+  const pinnedBatch = await request(`/projects/${project.id}/reference-assets`, {
+    method: 'POST', headers: { 'idempotency-key': `reference-pinned-${project.id}` },
+    body: JSON.stringify({ entityKind: 'character', entityId: character.entityId, count: 2, seed: 500 }),
+  });
+  assert.equal(pinnedBatch.response.status, 202);
+  const pinnedTask = await waitForGenerationTask(mediaRunner, pinnedBatch.body.task.id);
+  assert.equal(pinnedTask.status, 'succeeded');
+  assert.deepEqual(JSON.parse(pinnedTask.configuration_json).seedList, [500, 501]);
+});
+
+test('keyframe task hands both the character and the scene reference to the image provider', async () => {
+  const { project } = await createReadyScript();
+  await request(`/projects/${project.id}/script/confirm`, { method: 'POST' });
+  const storyboard = await request(`/projects/${project.id}/storyboard-tasks`, { method: 'POST' });
+  assert.equal(storyboard.response.status, 202);
+  const storyboardTask = await waitForStoryboardTask(storyboardRunner, storyboard.body.task.id);
+  assert.equal(storyboardTask.status, 'succeeded');
+
+  let state = (await request(`/projects/${project.id}`)).body;
+  const character = state.visualBible.content.characters[0];
+  const scene = state.visualBible.content.scenes[0];
+  assert.ok(character?.entityId && scene?.entityId);
+
+  for (const entity of [{ kind: 'character', id: character.entityId }, { kind: 'scene', id: scene.entityId }]) {
+    const batch = await request(`/projects/${project.id}/reference-assets`, {
+      method: 'POST', headers: { 'idempotency-key': `reference-${entity.kind}-${project.id}` },
+      body: JSON.stringify({ entityKind: entity.kind, entityId: entity.id, count: 1 }),
+    });
+    assert.equal(batch.response.status, 202);
+    const task = await waitForGenerationTask(mediaRunner, batch.body.task.id);
+    assert.equal(task.status, 'succeeded');
+  }
+
+  state = (await request(`/projects/${project.id}`)).body;
+  const characterAsset = state.referenceAssets.find(asset => asset.metadata?.entityKind === 'character');
+  const sceneAsset = state.referenceAssets.find(asset => asset.metadata?.entityKind === 'scene');
+  assert.ok(characterAsset && sceneAsset);
+  await request(`/media-assets/${characterAsset.id}/select`, { method: 'POST', body: '{}' });
+  await request(`/media-assets/${sceneAsset.id}/select`, { method: 'POST', body: '{}' });
+  await request(`/storyboard-plans/${state.storyboardPlan.id}/confirm`, { method: 'POST' });
+
+  state = (await request(`/projects/${project.id}`)).body;
+  const shot = state.segments.flatMap(segment => segment.shots || [])[0];
+  assert.ok(shot?.id);
+
+  mediaProvider.imageCalls.length = 0;
+  const started = await request(`/shots/${shot.id}/keyframe-tasks`, {
+    method: 'POST', headers: { 'idempotency-key': `keyframe-multi-${shot.id}` },
+    body: JSON.stringify({ count: 1 }),
+  });
+  assert.equal(started.response.status, 202);
+  const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
+  assert.equal(task.status, 'succeeded');
+  assert.equal(mediaProvider.imageCalls.length, 1);
+
+  const call = mediaProvider.imageCalls[0];
+  assert.ok(call.referenceImagePath, '必须提供主参考图');
+  assert.equal(call.referenceImagePaths.length, 1, '另一类参考图要作为补充参考图一起传给 provider');
+  assert.notEqual(call.referenceImagePath, call.referenceImagePaths[0]);
+  assert.match(call.prompt, /把这个角色自然地放进该场景/);
 });

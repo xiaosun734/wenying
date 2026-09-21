@@ -20,10 +20,11 @@ import {
   getSegmentVersion,
   openDatabase,
 } from '../server/db.mjs';
-import { MediaTaskRunner, distributeShotDurations, isGenerationSpecOutdated } from '../server/media-task.mjs';
+import { MediaTaskRunner, buildImageNegativePrompt, distributeShotDurations, isGenerationSpecOutdated } from '../server/media-task.mjs';
 import { FfmpegComposer } from '../server/providers/composer.mjs';
 import { JsonSubtitleProvider } from '../server/providers/subtitles.mjs';
 import { probeMedia } from '../server/media-probe.mjs';
+import { compileReferencePrompt, referenceVariants, sceneSafeDescription } from '../server/visual-assets.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +54,59 @@ test('builds an executable generation spec without leaking abstract narrative pu
   assert.match(spec.keyframePrompt, /静态关键帧/);
   assert.doesNotMatch(spec.motionPrompt, /列车/);
   assert.doesNotMatch(spec.motionPrompt, /叙事目的/);
+});
+
+test('builds a three-view character sheet in the project style without plot text', () => {
+  const bible = {
+    style: 'anime，悬疑，深夜冷色调，废弃地铁站，忽明忽暗的日光灯，灰尘如白雾浮动。',
+    visualStyle: 'anime',
+    characters: [{
+      name: '沈砚',
+      appearance: '男性，失忆，被冷醒后从水泥地上坐起；手掌按在冰凉的黄色安全线上。其余外貌特征未明。',
+      costume: '外套，胸前别着一枚白色葬礼胸花；没有手机。',
+    }],
+    scenes: [],
+  };
+  const prompt = compileReferencePrompt({
+    entity: bible.characters[0], kind: 'character', visualBible: bible,
+    configuration: { visualStyle: 'anime' }, variant: referenceVariants('character')[0],
+  });
+  assert.match(prompt, /三视图/);
+  assert.match(prompt, /正面、侧面、背面/);
+  assert.match(prompt, /anime/);
+  assert.doesNotMatch(prompt, /废弃地铁站|灰尘/);
+  assert.doesNotMatch(prompt, /未明|未交代/);
+  assert.doesNotMatch(prompt, /坐起|按在/);
+  assert.doesNotMatch(prompt, /没有手机/);
+  assert.match(prompt, /白色葬礼胸花/);
+});
+
+test('scene descriptions drop character actions and body sensations', () => {
+  const cleaned = sceneSafeDescription(
+    '深夜十一点十七分，废弃地铁站站台，后脑勺贴着水泥地，寒气沿脊背上升，头顶只剩两根日光灯挣扎闪烁，站台上有冰凉的黄色安全线，沈砚躺在站台上',
+    { characterNames: ['沈砚'] },
+  );
+  assert.match(cleaned, /废弃地铁站站台/);
+  assert.match(cleaned, /日光灯/);
+  assert.match(cleaned, /黄色安全线/);
+  assert.doesNotMatch(cleaned, /后脑勺|脊背/);
+  assert.doesNotMatch(cleaned, /沈砚/);
+});
+
+test('image negative prompts respect shot constraints and three-view sheets', () => {
+  const provider = {
+    imageNegativePrompt: '分格，多格漫画，重复人物，排版，可读文字，水印，低质量',
+    negativePrompt: '模糊，闪烁，面部闪烁，重影',
+  };
+  const keyframeNegative = buildImageNegativePrompt(provider, { mustNotShow: ['列车实体'], protectedConcepts: ['闪烁'] });
+  assert.doesNotMatch(keyframeNegative, /(^|，)闪烁(，|$)/);
+  assert.match(keyframeNegative, /面部闪烁/);
+  assert.match(keyframeNegative, /不要出现列车实体/);
+  assert.match(keyframeNegative, /分格/);
+
+  const sheetNegative = buildImageNegativePrompt(provider, { allowMultiView: true });
+  assert.doesNotMatch(sheetNegative, /分格|多格漫画|重复人物/);
+  assert.match(sheetNegative, /可读文字/);
 });
 
 test('repairs cross-beat evidence ids instead of failing the whole camera stage', () => {

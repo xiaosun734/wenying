@@ -3,3 +3,5 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+# dev server logs
+*.log

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -33,10 +33,17 @@ import {
   updateSegmentShot,
 } from './db.mjs';
 import { optionalPrompt, renderPrompt } from './prompt-config.mjs';
-import { buildGenerationSpec, compileKeyframePrompt, compileMotionPrompt } from './storyboard-task.mjs';
+import { acceptanceSettings, buildGenerationSpec, compileKeyframePrompt, compileMotionPrompt } from './storyboard-task.mjs';
 import { REFERENCE_ASSET_TYPES, buildGenerationSignature, compileReferencePrompt, getVisualEntity, referenceVariants, visualBibleContentHash } from './visual-assets.mjs';
+import { compileNegativePrompt } from './providers/comfyui.mjs';
 
 const doneStates = new Set(['succeeded', 'failed', 'canceled']);
+
+/**
+ * 多图参考（角色设定 + 场景母版）时给编辑模型的合成指令。
+ * 没有这句，编辑模型容易只去改第一张设定图，或者把两张参考图直接拼成上下两块。
+ */
+const MULTI_REFERENCE_KEYFRAME_HINT = '参考图已给出角色设定与场景母版：保持角色的五官、发型、服装和配色完全一致，保持场景的空间结构、陈设位置和光线不变，把这个角色自然地放进该场景的对应位置，输出单幅完整电影画面；不要拼贴，不要上下分屏，不要多视图排版，不要保留设定图的纯色背景';
 
 function defaultPrompt(project, segment) {
   return renderPrompt(optionalPrompt('VIDEO_DEFAULT_PROMPT_TEMPLATE'), {
@@ -157,22 +164,42 @@ export class MediaTaskRunner {
     updateGenerationTask(this.db, task.id, { status: 'running', current_step: 'composing_segment', progress: 12, started_at: timestamp(), updated_at: timestamp() });
     const assets = listMediaAssets(this.db, { segmentVersionId: version.id });
     const audio = assetByType(assets, 'audio');
+    const planConfiguration = version.storyboard_plan_id
+      ? getStoryboardPlan(this.db, version.storyboard_plan_id)?.configuration || {}
+      : {};
+    const acceptance = acceptanceSettings({ ...planConfiguration, ...(task.configuration || {}) });
+    const audioDurationMs = Number(audio?.durationMs || audio?.duration_ms || version.duration_ms || 0);
+    const shots = listSegmentShots(this.db, version.id);
+    const timelineMs = shots.reduce((sum, shot) => sum + Math.max(0, Number(shot.duration_ms || 0)), 0);
+    const composeDurationMs = acceptance.enabled && timelineMs > 0
+      ? Math.min(timelineMs, audioDurationMs || timelineMs)
+      : audioDurationMs || Number(version.duration_ms || 0);
     const subtitleAsset = await this.ensureSubtitleAsset({
       project,
-      version,
+      version: {
+        ...version,
+        duration_ms: acceptance.enabled ? audioDurationMs : version.duration_ms,
+        trim_to_ms: acceptance.enabled && composeDurationMs < audioDurationMs ? composeDurationMs : 0,
+      },
       existing: assetByType(assets, 'subtitle'),
     });
-    const shots = listSegmentShots(this.db, version.id);
     const shotAssets = shots.map(shot => ({ ...shot, objectKey: assets.find(asset => asset.shot_id === shot.id && asset.type === 'shot_video' && asset.status === 'ready')?.object_key })).filter(shot => shot.objectKey);
     if (!shotAssets.length) throw Object.assign(new Error('没有可合成的镜头视频'), { code: 'COMPOSER_SHOTS_EMPTY' });
     if (!this.composer) throw Object.assign(new Error('Composer 未配置'), { code: 'COMPOSER_NOT_CONFIGURED' });
     const transitions = version.storyboard_plan_id ? listShotTransitions(this.db, version.storyboard_plan_id) : [];
-    const composed = await this.composer.composeSegment({ project, segmentVersion: version, shots: shotAssets, transitions, audioAsset: audio, subtitleAsset });
+    const composeAudio = acceptance.enabled && composeDurationMs < audioDurationMs
+      ? { ...audio, durationMs: composeDurationMs }
+      : audio;
+    const composed = await this.composer.composeSegment({
+      project, segmentVersion: { ...version, duration_ms: composeDurationMs || version.duration_ms },
+      shots: shotAssets, transitions, audioAsset: composeAudio, subtitleAsset,
+    });
     for (const asset of assets.filter(asset => asset.type === 'video' && asset.status === 'ready')) updateMediaAsset(this.db, asset.id, { status: 'stale' });
     createMediaAsset(this.db, {
       id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'video',
       provider: this.composer.provider, model: this.composer.model, objectKey: composed.objectKey,
-      durationMs: composed.durationMs, sizeBytes: composed.sizeBytes, metadata: { ...composed.metadata, mode: 'recompose' },
+      durationMs: composed.durationMs, sizeBytes: composed.sizeBytes,
+      metadata: { ...composed.metadata, mode: 'recompose', acceptanceMode: acceptance.enabled, audioDurationMs },
     });
     updateSegmentVersion(this.db, version.id, { status: 'ready', updated_at: timestamp() });
     updateSegmentMedia(this.db, segment.id, { active_version_id: version.id, media_status: 'ready', updated_at: timestamp() });
@@ -190,7 +217,18 @@ export class MediaTaskRunner {
     this.assertImageProvider();
     updateGenerationTask(this.db, task.id, { status: 'running', current_step: 'generating_reference_candidates', progress: 8, started_at: timestamp(), updated_at: timestamp() });
     const count = clampCount(configuration.count, 1, 4);
-    const variants = referenceVariants(kind).slice(0, count);
+    // 角色只定义了一个“全身三视图”变体，需要出 4 张候选时就重复取用（换 seed）；
+    // 场景有多个机位变体，则依次取用。
+    const variantPool = referenceVariants(kind);
+    const variants = Array.from({ length: count }, (_, index) => variantPool[index % variantPool.length]);
+    const entityText = [
+      entity.name, entity.appearance, entity.costume, entity.description,
+      entity.layout, entity.lighting, entity.colorPalette, entity.state, entity.material,
+    ].filter(Boolean).join(' ');
+    const referenceNegative = buildImageNegativePrompt(this.provider, {
+      allowMultiView: kind === 'character',
+      protectedConcepts: /闪烁/.test(entityText) ? ['闪烁'] : [],
+    });
     const bibleHash = visualBibleContentHash(bible.content);
     const seedList = [];
     for (let index = 0; index < variants.length; index += 1) {
@@ -198,7 +236,7 @@ export class MediaTaskRunner {
       const prompt = configuration.promptOverride
         ? `${configuration.promptOverride}；${variant.instruction}`
         : compileReferencePrompt({ entity, kind, visualBible: bible.content, variant });
-      const seed = Number.isInteger(Number(configuration.seed)) ? Number(configuration.seed) + index : undefined;
+      const seed = candidateSeed(configuration, index);
       const signature = buildGenerationSignature({
         kind: 'reference', entityId: entity.entityId, entityKind: kind, visualBibleHash: bibleHash,
         promptCompilerVersion: 'reference-prompt-v1', prompt, workflowHash: this.provider.workflowHash || null,
@@ -207,8 +245,10 @@ export class MediaTaskRunner {
       const image = await this.provider.generateImage({
         project,
         prompt,
+        negativePrompt: referenceNegative,
+        negativeOverride: true,
         seed,
-        filenamePrefix: `reference_${safePart(kind)}_${safePart(entity.entityId)}_${variant.id}`,
+        filenamePrefix: `reference_${safePart(kind)}_${safePart(entity.entityId)}_${variant.id}_${index + 1}`,
         width: configuration.width,
         height: configuration.height,
         metadata: { entityId: entity.entityId, entityKind: kind, variantId: variant.id, variantLabel: variant.label, visualBibleId: bible.id, visualBibleHash: bibleHash, generationSignature: signature },
@@ -263,7 +303,12 @@ export class MediaTaskRunner {
     const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
     const preferCharacter = Boolean(String(spec.visibleSubject || '').trim());
     const primaryReference = selectPrimaryReferenceAsset(this.db, project.id, referenceAssetIds, preferCharacter);
-    const referenceImagePath = primaryReference && this.provider.mediaRoot ? resolve(this.provider.mediaRoot, primaryReference.object_key) : null;
+    const companionReferences = selectCompanionReferenceAssets(this.db, project.id, referenceAssetIds, primaryReference);
+    const referenceImagePath = referenceImagePathOf(this.provider, primaryReference);
+    // 补充参考图（场景 / 另一类实体）：多图编辑工作流靠它们把人物真正放进场景，
+    // 只有一张设定图时模型只能凭空补场景，最后往往交出“两张图拼在一起”的折中画面。
+    const referenceImagePaths = companionReferences.map(asset => referenceImagePathOf(this.provider, asset)).filter(Boolean);
+    const submittedPrompt = referenceImagePaths.length ? `${MULTI_REFERENCE_KEYFRAME_HINT}；${prompt}` : prompt;
     const referenceRequired = this.keyframeReferenceRequired();
     if (referenceRequired && !referenceImagePath) {
       throw Object.assign(
@@ -273,7 +318,7 @@ export class MediaTaskRunner {
     }
     const seedList = [];
     for (let index = 0; index < count; index += 1) {
-      const seed = Number.isInteger(Number(configuration.seed)) ? Number(configuration.seed) + index : undefined;
+      const seed = candidateSeed(configuration, index);
       const signature = buildGenerationSignature({
         kind: 'keyframe', frameType, shotId: shot.id, scriptVersionHash: plan?.script_version_id || null,
         generationSpecHash: buildGenerationSignature({ spec }), visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes,
@@ -282,13 +327,19 @@ export class MediaTaskRunner {
       });
       const image = await this.provider.generateImage({
         project,
-        prompt,
+        prompt: submittedPrompt,
+        negativePrompt: buildImageNegativePrompt(this.provider, {
+          mustNotShow: spec.mustNotShow || [],
+          protectedConcepts: spec.protectedPositiveConcepts || [],
+        }),
+        negativeOverride: true,
         seed,
         filenamePrefix: `${frameType === 'end' ? 'endframe' : 'keyframe'}_${safePart(shot.id)}_${index + 1}`,
         width: configuration.width,
         height: configuration.height,
         referenceImagePath,
-        metadata: { shotId: shot.id, frameType, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, generationSignature: signature },
+        referenceImagePaths,
+        metadata: { shotId: shot.id, frameType, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, referenceImagePaths, generationSignature: signature },
       });
       if (referenceRequired && !image.metadata?.startImage) {
         throw Object.assign(
@@ -412,13 +463,20 @@ export class MediaTaskRunner {
 
       const refreshedAudio = listMediaAssets(this.db, { segmentVersionId: version.id });
       const audio = assetByType(refreshedAudio, 'audio');
-      const actualDurationMs = Number(audio?.durationMs || audio?.duration_ms || version.duration_ms);
+      const audioDurationMs = Number(audio?.durationMs || audio?.duration_ms || version.duration_ms);
+      const acceptance = acceptanceSettings(task.configuration || {});
+      let shots = await this.ensureShots(project, segment, version, task, audio);
+      shots = this.ensureGenerationSpecs(project, shots);
+      // 验收模式只保留前 N 个镜头，成片跟着镜头时间轴走，旁白由合成器裁切。
+      const timelineMs = shots.reduce((sum, shot) => sum + Math.max(0, Number(shot.duration_ms || 0)), 0);
+      const composeDurationMs = acceptance.enabled && timelineMs > 0
+        ? Math.min(timelineMs, audioDurationMs || timelineMs)
+        : audioDurationMs;
+      const actualDurationMs = composeDurationMs;
       if (actualDurationMs > 0 && actualDurationMs !== version.duration_ms) {
         updateSegmentVersion(this.db, version.id, { duration_ms: actualDurationMs, updated_at: timestamp() });
         updateSegmentDuration(this.db, segment.id, actualDurationMs);
       }
-      let shots = await this.ensureShots(project, segment, version, task, audio);
-      shots = this.ensureGenerationSpecs(project, shots);
       updateGenerationTask(this.db, task.id, { current_step: 'generating_shots', progress: 48, updated_at: timestamp() });
       const requireKeyframe = task.configuration?.keyframeRequired ?? String(process.env.KEYFRAME_REQUIRED || '').toLowerCase() === 'true';
       const currentBible = getLatestVisualBible(this.db, project.id, project.active_script_version_id);
@@ -468,7 +526,11 @@ export class MediaTaskRunner {
       assets = listMediaAssets(this.db, { segmentVersionId: version.id });
       await this.ensureSubtitleAsset({
         project,
-        version: { ...version, duration_ms: actualDurationMs },
+        version: {
+          ...version,
+          duration_ms: acceptance.enabled ? audioDurationMs : actualDurationMs,
+          trim_to_ms: acceptance.enabled && composeDurationMs < audioDurationMs ? composeDurationMs : 0,
+        },
         existing: assetByType(assets, 'subtitle'),
       });
 
@@ -478,11 +540,14 @@ export class MediaTaskRunner {
       const transitions = version.storyboard_plan_id ? listShotTransitions(this.db, version.storyboard_plan_id) : [];
       const subtitleAsset = assetByType(allAssets, 'subtitle');
       const composer = this.composer;
+      const composeAudio = acceptance.enabled && composeDurationMs < audioDurationMs
+        ? { ...audio, durationMs: composeDurationMs }
+        : audio;
       const composed = composer
-        ? await composer.composeSegment({ project, segmentVersion: { ...version, duration_ms: actualDurationMs }, shots: shotAssets, transitions, audioAsset: audio, subtitleAsset })
+        ? await composer.composeSegment({ project, segmentVersion: { ...version, duration_ms: actualDurationMs }, shots: shotAssets, transitions, audioAsset: composeAudio, subtitleAsset })
         : await this.provider.generateVideo({ project, segmentVersion: version });
       if (!assetByType(listMediaAssets(this.db, { segmentVersionId: version.id }), 'video')) {
-        createMediaAsset(this.db, { id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'video', provider: composer?.provider || this.provider.provider, model: composer?.model || this.provider.model, objectKey: composed.objectKey, durationMs: composed.durationMs, sizeBytes: composed.sizeBytes, metadata: composed.metadata });
+        createMediaAsset(this.db, { id: randomUUID(), projectId: project.id, segmentVersionId: version.id, type: 'video', provider: composer?.provider || this.provider.provider, model: composer?.model || this.provider.model, objectKey: composed.objectKey, durationMs: composed.durationMs, sizeBytes: composed.sizeBytes, metadata: { ...composed.metadata, acceptanceMode: acceptance.enabled, audioDurationMs } });
       }
 
       updateSegmentVersion(this.db, version.id, { status: 'ready', updated_at: timestamp() });
@@ -508,10 +573,13 @@ export class MediaTaskRunner {
   }
 
   async ensureShots(project, segment, version, task, audioAsset) {
+    const acceptance = acceptanceSettings(task.configuration || {});
     let shots = listSegmentShots(this.db, version.id);
     const durationMs = Number(audioAsset?.durationMs || audioAsset?.duration_ms || version.duration_ms || segment.duration_ms || 5000);
     if (shots.length) {
-      const durations = distributeShotDurations(durationMs, shots);
+      const durations = acceptance.enabled
+        ? capShotDurations(shots, acceptance.shotDurationMs)
+        : distributeShotDurations(durationMs, shots);
       shots.forEach((shot, index) => {
         if (shot.duration_ms !== durations[index]) {
           updateSegmentShot(this.db, shot.id, { duration_ms: durations[index], updated_at: timestamp() });
@@ -519,10 +587,12 @@ export class MediaTaskRunner {
       });
       return listSegmentShots(this.db, version.id);
     }
-    const count = Math.max(1, Math.ceil(durationMs / 5000));
+    const count = acceptance.enabled
+      ? Math.min(acceptance.shotLimit, Math.max(1, Math.ceil(durationMs / 5000)))
+      : Math.max(1, Math.ceil(durationMs / 5000));
     let planned = null;
     if (this.textProvider?.generateShotPrompts) {
-      planned = await this.textProvider.generateShotPrompts({ scriptText: version.script_text, summary: segment.summary, genre: project.genre, count, idempotencyKey: `${task.id}:shots` });
+      planned = await this.textProvider.generateShotPrompts({ scriptText: version.script_text, summary: segment.summary, background: project.background || '', genre: project.genre, count, idempotencyKey: `${task.id}:shots` });
     }
     const zh = Array.isArray(planned?.shots) ? planned.shots : [];
     const fallbackPrompt = optionalPrompt('VIDEO_FALLBACK_SHOT_PROMPT_TEMPLATE');
@@ -533,8 +603,12 @@ export class MediaTaskRunner {
         sequence: index + 1,
       })),
     }));
-    const each = Math.floor(durationMs / count);
-    const rows = normalized.map((item, index) => createSegmentShot(this.db, { id: randomUUID(), segmentVersionId: version.id, sequence: item.sequence, promptZh: item.promptZh, durationMs: index === count - 1 ? durationMs - each * (count - 1) : each, status: 'ready' }));
+    const baseEach = Math.floor(durationMs / count);
+    const each = acceptance.enabled ? Math.max(1, Math.min(acceptance.shotDurationMs, baseEach)) : baseEach;
+    const rows = normalized.map((item, index) => createSegmentShot(this.db, {
+      id: randomUUID(), segmentVersionId: version.id, sequence: item.sequence, promptZh: item.promptZh,
+      durationMs: !acceptance.enabled && index === count - 1 ? durationMs - each * (count - 1) : each, status: 'ready',
+    }));
     return listSegmentShots(this.db, version.id);
   }
 
@@ -581,6 +655,28 @@ export class MediaTaskRunner {
   }
 }
 
+/** 图片负面词里“禁止多视图排版”的那批词，角色三视图需要把它们去掉。 */
+const MULTI_VIEW_NEGATIVE_TERMS = [
+  '分格', '多格漫画', '拼贴', '上下分屏', '左右分屏', '重复人物', '排版',
+  'collage', 'split screen', 'storyboard', 'comic panels', 'multiple frames',
+  'contact sheet', 'diptych', 'triptych',
+];
+
+/**
+ * 图片（参考图 / 关键帧）的完整负面词：
+ * 全局图片负面词（三视图时去掉禁止多视图排版的那批）+ 技术质量负面词
+ * （按需剔除与正向剧情冲突的词，并追加本镜头 mustNotShow）。
+ */
+export function buildImageNegativePrompt(provider, { allowMultiView = false, mustNotShow = [], protectedConcepts = [] } = {}) {
+  const baseTerms = String(provider?.imageNegativePrompt || '')
+    .split(/[，,、;；\n]+/)
+    .map(value => value.trim())
+    .filter(Boolean)
+    .filter(term => !allowMultiView || !MULTI_VIEW_NEGATIVE_TERMS.some(banned => term.toLowerCase().includes(banned.toLowerCase())));
+  const qualityTerms = compileNegativePrompt(provider?.negativePrompt || '', mustNotShow, protectedConcepts);
+  return [...baseTerms, qualityTerms].filter(Boolean).join('，');
+}
+
 /**
  * A stored generation spec is only reusable while it was built from the same
  * visual bible. Specs written before visualBibleHash existed are outdated too,
@@ -590,6 +686,12 @@ export function isGenerationSpecOutdated(spec, bibleHash) {
   if (!spec || !spec.version) return true;
   if (!spec.visualBibleHash) return true;
   return spec.visualBibleHash !== bibleHash;
+}
+
+/** 验收模式：把镜头时长压到可快速生成的长度，不改动旁白音频本身。 */
+export function capShotDurations(shots, maxShotMs) {
+  const limit = Math.max(1, Number(maxShotMs) || 5000);
+  return shots.map(shot => Math.max(1, Math.min(limit, Number(shot.duration_ms || shot.durationMs) || limit)));
 }
 
 export function distributeShotDurations(totalMs, shots) {
@@ -615,6 +717,19 @@ export async function waitForGenerationTask(runner, taskId, timeoutMs = 30000) {
   }
   return getGenerationTask(runner.db, taskId);
 }
+/**
+ * 候选图 seed 解析：只有调用方显式传了 seed 才固定，否则返回 undefined 交给 provider 随机。
+ * 不能用 Number.isInteger(Number(value)) 判断——Number(null) === 0 会把“没填”当成 seed 0，
+ * 于是每次重新生成都用同一组种子（0/1/2/3），画面几乎一模一样。
+ */
+export function candidateSeed(configuration = {}, index = 0) {
+  const value = configuration?.seed;
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return undefined;
+  return Math.trunc(number) + index;
+}
+
 function clampCount(value, min, max) {
   const number = Number(value);
   return Math.max(min, Math.min(max, Number.isInteger(number) ? number : min));
@@ -657,6 +772,24 @@ function subtitleAssetUsable(asset, mediaRoot) {
   if (!srtKey || !mediaRoot) return true;
   return existsSync(resolve(mediaRoot, srtKey));
 }
+function referenceImagePathOf(provider, asset) {
+  return asset?.object_key && provider?.mediaRoot ? resolve(provider.mediaRoot, asset.object_key) : null;
+}
+
+/**
+ * 主参考之外的补充参考图：每个类型最多取一张，最多两张。
+ * 单图 img2img 工作流会忽略，声明了 referenceImages 的多图编辑工作流会用到。
+ */
+function selectCompanionReferenceAssets(db, projectId, assetIds, primary) {
+  const ids = new Set((assetIds || []).filter(Boolean));
+  if (!ids.size) return [];
+  const assets = listMediaAssets(db, { projectId }).filter(asset => ids.has(asset.id) && asset.status === 'ready');
+  return ['scene_reference', 'character_reference', 'prop_reference']
+    .map(type => assets.find(asset => asset.type === type && asset.id !== primary?.id))
+    .filter(Boolean)
+    .slice(0, 2);
+}
+
 function selectPrimaryReferenceAsset(db, projectId, assetIds, preferCharacter = true) {
   const ids = new Set((assetIds || []).filter(Boolean));
   if (!ids.size) return null;

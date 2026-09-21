@@ -13,17 +13,35 @@ export class JsonSubtitleProvider {
     const output = resolve(this.mediaRoot, objectKey);
     await mkdir(dirname(output), { recursive: true });
     const durationMs = Number(segmentVersion.duration_ms || 0);
-    const cues = buildCues(segmentVersion.script_text || '', durationMs);
-    const payload = { version: 2, durationMs, text: segmentVersion.script_text || '', cues };
+    const trimToMs = Math.max(0, Number(segmentVersion.trim_to_ms || 0));
+    const effectiveMs = trimToMs > 0 ? Math.min(trimToMs, durationMs) : durationMs;
+    let cues = buildCues(segmentVersion.script_text || '', durationMs);
+    if (trimToMs > 0 && trimToMs < durationMs) {
+      // 验收模式只渲染前几秒的画面，字幕也只保留这一段真正会念到的内容。
+      cues = cues
+        .filter(cue => cue.startMs < effectiveMs)
+        .map(cue => ({ ...cue, endMs: Math.min(cue.endMs, effectiveMs) }))
+        .filter(cue => cue.endMs > cue.startMs);
+    }
+    const payload = {
+      version: 2,
+      durationMs: effectiveMs,
+      text: cues.length ? cues.map(cue => cue.text).join('') : (segmentVersion.script_text || ''),
+      cues,
+    };
     const data = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
     await writeFile(output, data);
     const srt = cues.map((cue, index) => `${index + 1}\n${formatSrtTime(cue.startMs)} --> ${formatSrtTime(cue.endMs)}\n${cue.text}\n`).join('\n');
     await writeFile(output.replace(/\.json$/i, '.srt'), Buffer.from(srt, 'utf8'));
     return {
       objectKey,
-      durationMs,
+      durationMs: effectiveMs,
       sizeBytes: data.length,
-      metadata: { format: 'json+srt', cueCount: cues.length, textLength: Array.from(payload.text).length, srtObjectKey: objectKey.replace(/\.json$/i, '.srt') },
+      metadata: {
+        format: 'json+srt', cueCount: cues.length, textLength: Array.from(payload.text).length,
+        srtObjectKey: objectKey.replace(/\.json$/i, '.srt'),
+        trimmedToMs: trimToMs > 0 ? effectiveMs : null,
+      },
     };
   }
 }

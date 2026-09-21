@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { optionalPrompt, renderPrompt } from '../prompt-config.mjs';
-import { applyWorkflowManifest, loadWorkflowManifest, validateWorkflowForManifest } from '../workflow-manifest.mjs';
+import { applyWorkflowManifest, loadWorkflowManifest, validateWorkflowForManifest, verifyWorkflowPair } from '../workflow-manifest.mjs';
 import { probeMedia } from '../media-probe.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
@@ -82,6 +82,32 @@ export class ComfyUiMediaProvider {
     this.ffprobePath = ffprobePath || process.env.FFPROBE_PATH || 'ffprobe';
   }
 
+  /**
+   * 只读自检：确认每一组“工作流 + manifest”都存在、配对且形态一致。
+   * 在服务启动时调用，避免跑到生成阶段才发现配错了档案。
+   */
+  async verifyWorkflows() {
+    const pairs = [
+      { label: 'video', workflowPath: this.workflowPath, manifestPath: this.workflowManifestPath },
+      { label: 'image', workflowPath: this.imageWorkflowPath, manifestPath: this.imageWorkflowManifestPath },
+      { label: 'keyframe', workflowPath: this.keyframeWorkflowPath, manifestPath: this.keyframeWorkflowManifestPath },
+    ];
+    const results = [];
+    for (const pair of pairs) {
+      if (!pair.workflowPath) {
+        results.push({ ...pair, configured: false, ok: false, error: new ComfyUiError('未配置工作流路径', 'COMFYUI_NOT_CONFIGURED') });
+        continue;
+      }
+      try {
+        const verified = await verifyWorkflowPair(pair.workflowPath, pair.manifestPath);
+        results.push({ ...pair, ...verified, ok: true });
+      } catch (error) {
+        results.push({ ...pair, configured: true, ok: false, error });
+      }
+    }
+    return results;
+  }
+
   async generateVideo({ project, segmentVersion, shot = null, startImagePath = null, keyframeAsset = null, generationSignature = null }) {
     this.assertConfigured();
     const manifest = await loadWorkflowManifest(this.workflowManifestPath);
@@ -153,7 +179,10 @@ export class ComfyUiMediaProvider {
     };
   }
 
-  async generateImage({ project, prompt, negativePrompt = '', seed, filenamePrefix = 'image', width, height, referenceImagePath = null, metadata = {} }) {
+  async generateImage({
+    project, prompt, negativePrompt = '', seed, filenamePrefix = 'image',
+    width, height, referenceImagePath = null, referenceImagePaths = [], metadata = {}, negativeOverride = false,
+  }) {
     const useReference = Boolean(referenceImagePath && this.keyframeWorkflowPath && this.useReferenceForKeyframes);
     const workflowPath = useReference ? this.keyframeWorkflowPath : this.imageWorkflowPath;
     const manifestPath = useReference ? this.keyframeWorkflowManifestPath : this.imageWorkflowManifestPath;
@@ -165,7 +194,22 @@ export class ComfyUiMediaProvider {
     const imageSeed = seed === undefined || seed === null || seed === '' ? Math.floor(Math.random() * 2 ** 31) : Number(seed);
     const clientId = randomUUID();
     const uploadedImage = useReference ? await this.uploadInputImage(clientId, referenceImagePath) : null;
-    const combinedNegative = [this.imageNegativePrompt, negativePrompt || this.negativePrompt].filter(Boolean).join('，');
+    // 补充参考图：多图编辑工作流（Qwen-Image-Edit / Kontext 等）会按 manifest.referenceImages
+    // 把它们接到第二个、第三个 LoadImage 上；单图 img2img 工作流拿不到映射会自动忽略。
+    const companionSlots = Array.isArray(manifest?.referenceImages) ? manifest.referenceImages.length : 0;
+    const uploadedCompanions = [];
+    if (useReference && companionSlots > 0) {
+      for (const companionPath of referenceImagePaths.slice(0, companionSlots)) {
+        if (!companionPath) continue;
+        const uploaded = await this.uploadInputImage(clientId, companionPath);
+        if (uploaded) uploadedCompanions.push(uploaded);
+      }
+    }
+    // negativeOverride=true 时调用方已经编译好了完整负向词（含镜头 mustNotShow 与保护概念），
+    // 这里不再自动拼接全局负面词，避免出现“要求闪烁又禁止闪烁”这类冲突。
+    const combinedNegative = negativeOverride && negativePrompt
+      ? negativePrompt
+      : [this.imageNegativePrompt, negativePrompt || this.negativePrompt].filter(Boolean).join('，');
     const prepared = this.prepareImageWorkflow(workflow, {
       prompt: String(prompt || ''),
       negativePrompt: combinedNegative,
@@ -174,6 +218,7 @@ export class ComfyUiMediaProvider {
       height: imageHeight,
       denoise: this.keyframeDenoise,
       startImage: uploadedImage || undefined,
+      referenceImages: uploadedCompanions,
       filenamePrefix: `wenying/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}`,
       manifest,
     });
@@ -188,7 +233,11 @@ export class ComfyUiMediaProvider {
     })}`);
     const data = Buffer.from(await response.arrayBuffer());
     const extension = output.extension || '.png';
-    const objectKey = `projects/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}-${imageSeed}${extension}`;
+    // 文件名带上工作流内容指纹：改提示词或换 seed 都会落到新路径，
+    // 不会再把上一轮候选覆盖掉（旧行为会让“重新生成”看起来和第一次一模一样）。
+    const contentToken = String(prepared.workflowHash || '').slice(0, 8)
+      || createHash('sha256').update(`${filenamePrefix}:${imageSeed}:${prompt}`).digest('hex').slice(0, 8);
+    const objectKey = `projects/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}-${imageSeed}-${contentToken}${extension}`;
     const outputPath = resolve(this.mediaRoot, objectKey);
     await mkdir(dirname(outputPath), { recursive: true });
     await writeFile(outputPath, data);
@@ -214,11 +263,13 @@ export class ComfyUiMediaProvider {
         workflowHash: prepared.workflowHash,
         startImage: Boolean(uploadedImage),
         referenceImagePath: referenceImagePath || null,
+        companionReferenceImagePaths: referenceImagePaths.filter(Boolean),
+        referenceImagesUsed: uploadedCompanions.length,
         sha256,
       },
     };
   }
-  prepareImageWorkflow(prompt, { prompt: positiveText, negativePrompt, seed, width, height, denoise, startImage, filenamePrefix, manifest = null }) {
+  prepareImageWorkflow(prompt, { prompt: positiveText, negativePrompt, seed, width, height, denoise, startImage, referenceImages = [], filenamePrefix, manifest = null }) {
     if (manifest) {
       applyWorkflowManifest(prompt, manifest, {
         positivePrompt: positiveText,
@@ -228,6 +279,7 @@ export class ComfyUiMediaProvider {
         height,
         denoise,
         startImage,
+        referenceImages,
       });
       if (manifest.filenamePrefix) setManifestValue(prompt, manifest.filenamePrefix, filenamePrefix);
       const workflowHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');

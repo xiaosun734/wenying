@@ -10,6 +10,7 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "test": "node --test",
-    "verify": "node scripts/verify-accuracy.mjs"
+    "verify": "node scripts/verify-accuracy.mjs",
+    "check:keyframe-edit": "node scripts/check-keyframe-edit.mjs"
   }
 }

@@ -131,11 +131,31 @@ check('镜头时长误差 ≤ 50ms', durationDrift === 0, durationDrift ? `${dur
 
 const audio = assets.filter(item => item.type === 'audio' && item.status === 'ready').sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
 const shotTotal = shots.reduce((sum, shot) => sum + Number(shot.duration_ms || 0), 0);
-check(
-  '镜头时长之和等于真实 TTS 时长',
-  Boolean(audio) && shotTotal === Number(audio.duration_ms),
-  `镜头合计 ${shotTotal}ms / 音频 ${audio?.duration_ms ?? '无'} ms`,
-);
+const acceptance = plan?.configuration?.acceptanceMode
+  ? {
+    shotLimit: Math.max(1, Number(plan.configuration.acceptanceShotLimit) || 1),
+    shotDurationMs: Math.max(1000, Number(plan.configuration.acceptanceShotDurationMs) || 5000),
+  }
+  : null;
+const readyComposition = assets
+  .filter(item => item.type === 'video' && item.status === 'ready')
+  .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+const compositionDurationMs = readyComposition?.duration_ms ?? null;
+if (acceptance) {
+  check(
+    `验收模式：只规划了 ${acceptance.shotLimit} 个镜头`,
+    shots.length === acceptance.shotLimit,
+    `实际 ${shots.length} 个镜头，单镜上限 ${acceptance.shotDurationMs}ms`,
+  );
+  check('验收模式：成片时长等于镜头时间轴', Math.abs((compositionDurationMs ?? 0) - shotTotal) <= 100, `成片 ${compositionDurationMs ?? '无'}ms / 镜头合计 ${shotTotal}ms`);
+  manualChecks.push('验收模式：成片只覆盖解说文案的开头，字幕与旁白应对应同一段内容。');
+} else {
+  check(
+    '镜头时长之和等于真实 TTS 时长',
+    Boolean(audio) && shotTotal === Number(audio.duration_ms),
+    `镜头合计 ${shotTotal}ms / 音频 ${audio?.duration_ms ?? '无'} ms`,
+  );
+}
 if (audio) check('TTS 时长来自 ffprobe 实测', audio.metadata?.durationSource === 'ffprobe', `durationSource=${audio.metadata?.durationSource || '未知'}`, 'warn');
 
 const subtitle = assets.filter(item => item.type === 'subtitle' && item.status === 'ready').sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
@@ -155,11 +175,19 @@ if (!composition) {
   const file = resolve(mediaRoot, composition.object_key);
   check('成片文件存在', existsSync(file), composition.object_key);
   check('成片包含视频流与音轨', meta.probe?.hasVideo === true && meta.probe?.hasAudio === true, `video=${meta.probe?.hasVideo} audio=${meta.probe?.hasAudio}`);
-  check(
-    '成片时长等于音频时长',
-    Boolean(audio) && Math.abs(Number(composition.duration_ms) - Number(audio.duration_ms)) <= 100,
-    `成片 ${composition.duration_ms}ms / 音频 ${audio?.duration_ms ?? '无'} ms`,
-  );
+  if (acceptance) {
+    check(
+      '成片覆盖完整镜头时间轴',
+      Math.abs(Number(composition.duration_ms) - shotTotal) <= 100,
+      `成片 ${composition.duration_ms}ms / 镜头合计 ${shotTotal}ms（旁白被裁切到 ${meta.audioDurationMs ?? '?'}ms 原音频的开头）`,
+    );
+  } else {
+    check(
+      '成片时长等于音频时长',
+      Boolean(audio) && Math.abs(Number(composition.duration_ms) - Number(audio.duration_ms)) <= 100,
+      `成片 ${composition.duration_ms}ms / 音频 ${audio?.duration_ms ?? '无'} ms`,
+    );
+  }
   if (file && existsSync(file) && !meta.probe) {
     const probed = probe(file);
     if (probed) check('ffprobe 复核成片', probed.hasVideo && probed.hasAudio, `${probed.durationMs}ms ${probed.width}x${probed.height}`);

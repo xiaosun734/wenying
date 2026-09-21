@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+﻿import { randomUUID } from 'node:crypto';
 import {
   createScriptVersion,
   createSegment,
@@ -71,6 +71,7 @@ export class RewriteTaskRunner {
       updateTask(this.db, task.id, { current_step: 'rewriting', progress: 25, updated_at: timestamp() });
       const result = await this.provider.rewrite({
         sourceText,
+        background: cleanSourceText(project.background || ''),
         genre: project.genre,
         promptVersion: task.prompt_version,
         idempotencyKey: task.idempotency_key,

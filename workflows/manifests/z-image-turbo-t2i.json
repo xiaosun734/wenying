@@ -1,7 +1,7 @@
 {
-  "profileId": "krea2-keyframe-img2img",
+  "profileId": "z-image-turbo-t2i",
   "workflowVersion": 1,
-  "mode": "i2i",
+  "mode": "t2i",
   "positivePrompt": {
     "node": "6",
     "field": "text"
@@ -10,10 +10,6 @@
     "node": "7",
     "field": "text"
   },
-  "startImage": {
-    "node": "10",
-    "field": "image"
-  },
   "seedInputs": [
     {
       "node": "3",
@@ -21,14 +17,18 @@
       "increment": 0
     }
   ],
-  "denoise": {
-    "node": "3",
-    "field": "denoise"
+  "width": {
+    "node": "5",
+    "field": "width"
+  },
+  "height": {
+    "node": "5",
+    "field": "height"
   },
   "filenamePrefix": {
     "node": "9",
     "field": "filename_prefix"
   },
   "outputNode": "9",
-  "requiresStartImage": true
+  "requiresStartImage": false
 }
