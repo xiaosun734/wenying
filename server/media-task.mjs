@@ -39,12 +39,6 @@ import { compileNegativePrompt } from './providers/comfyui.mjs';
 
 const doneStates = new Set(['succeeded', 'failed', 'canceled']);
 
-/**
- * 多图参考（角色设定 + 场景母版）时给编辑模型的合成指令。
- * 没有这句，编辑模型容易只去改第一张设定图，或者把两张参考图直接拼成上下两块。
- */
-const MULTI_REFERENCE_KEYFRAME_HINT = '参考图已给出角色设定与场景母版：保持角色的五官、发型、服装和配色完全一致，保持场景的空间结构、陈设位置和光线不变，把这个角色自然地放进该场景的对应位置，输出单幅完整电影画面；不要拼贴，不要上下分屏，不要多视图排版，不要保留设定图的纯色背景';
-
 function defaultPrompt(project, segment) {
   return renderPrompt(optionalPrompt('VIDEO_DEFAULT_PROMPT_TEMPLATE'), {
     genre: project.genre,
@@ -231,12 +225,17 @@ export class MediaTaskRunner {
     });
     const bibleHash = visualBibleContentHash(bible.content);
     const seedList = [];
+    // 场景候选是一组“同一空间的不同机位”。共享基础 seed 能让建筑、材质和色板
+    // 比四张完全独立的文生图更稳定，variant 指令仍负责改变摄影机位置。
+    const sceneViewSeed = kind === 'scene'
+      ? (candidateSeed(configuration, 0) ?? Math.floor(Math.random() * 2 ** 31))
+      : undefined;
     for (let index = 0; index < variants.length; index += 1) {
       const variant = variants[index];
       const prompt = configuration.promptOverride
         ? `${configuration.promptOverride}；${variant.instruction}`
         : compileReferencePrompt({ entity, kind, visualBible: bible.content, variant });
-      const seed = candidateSeed(configuration, index);
+      const seed = kind === 'scene' ? sceneViewSeed : candidateSeed(configuration, index);
       const signature = buildGenerationSignature({
         kind: 'reference', entityId: entity.entityId, entityKind: kind, visualBibleHash: bibleHash,
         promptCompilerVersion: 'reference-prompt-v1', prompt, workflowHash: this.provider.workflowHash || null,
@@ -251,14 +250,14 @@ export class MediaTaskRunner {
         filenamePrefix: `reference_${safePart(kind)}_${safePart(entity.entityId)}_${variant.id}_${index + 1}`,
         width: configuration.width,
         height: configuration.height,
-        metadata: { entityId: entity.entityId, entityKind: kind, variantId: variant.id, variantLabel: variant.label, visualBibleId: bible.id, visualBibleHash: bibleHash, generationSignature: signature },
+        metadata: { entityId: entity.entityId, entityKind: kind, variantId: variant.id, variantLabel: variant.label, visualBibleId: bible.id, visualBibleHash: bibleHash, generationTaskId: task.id, viewSetId: kind === 'scene' ? task.id : null, viewIndex: index + 1, generationSignature: signature },
       });
       seedList.push(image.metadata?.seed ?? seed ?? null);
       createMediaAsset(this.db, {
         id: randomUUID(), projectId: project.id, type: REFERENCE_ASSET_TYPES[kind],
         provider: this.provider.provider, model: this.provider.model, objectKey: image.objectKey,
         sizeBytes: image.sizeBytes, generationSignature: signature,
-        metadata: { ...image.metadata, entityId: entity.entityId, entityKind: kind, variantId: variant.id, variantLabel: variant.label, visualBibleId: bible.id, visualBibleHash: bibleHash, generationSignature: signature, selected: false },
+        metadata: { ...image.metadata, entityId: entity.entityId, entityKind: kind, variantId: variant.id, variantLabel: variant.label, visualBibleId: bible.id, visualBibleHash: bibleHash, generationTaskId: task.id, viewSetId: kind === 'scene' ? task.id : null, viewIndex: index + 1, generationSignature: signature, selected: false },
       });
       updateGenerationTask(this.db, task.id, { progress: Math.round(((index + 1) / variants.length) * 92), updated_at: timestamp() });
     }
@@ -301,14 +300,14 @@ export class MediaTaskRunner {
     }
     const referenceAssetIds = uniqueValues([...(spec.referenceAssetIds || []), ...selectedBibleReferenceIds(bible.content)]);
     const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
-    const preferCharacter = Boolean(String(spec.visibleSubject || '').trim());
-    const primaryReference = selectPrimaryReferenceAsset(this.db, project.id, referenceAssetIds, preferCharacter);
-    const companionReferences = selectCompanionReferenceAssets(this.db, project.id, referenceAssetIds, primaryReference);
-    const referenceImagePath = referenceImagePathOf(this.provider, primaryReference);
-    // 补充参考图（场景 / 另一类实体）：多图编辑工作流靠它们把人物真正放进场景，
-    // 只有一张设定图时模型只能凭空补场景，最后往往交出“两张图拼在一起”的折中画面。
+    const { canvasReference, companionReferences } = selectKeyframeReferenceAssets(this.db, project.id, referenceAssetIds, editableShot);
+    // 关键帧走的是 Qwen-Image-Edit 的“编辑画布”路线：主参考图会被 ImageScale →
+    // VAEEncode 接进 KSampler.latent_image，是模型真正要编辑的那张图，所以它必须是
+    // 场景图（角色要被放进的地方）。角色三视图只能当参考图 2，负责身份与外观。
+    const referenceImagePath = referenceImagePathOf(this.provider, canvasReference);
     const referenceImagePaths = companionReferences.map(asset => referenceImagePathOf(this.provider, asset)).filter(Boolean);
-    const submittedPrompt = referenceImagePaths.length ? `${MULTI_REFERENCE_KEYFRAME_HINT}；${prompt}` : prompt;
+    const referenceRelationship = buildReferenceRelationshipPrompt(canvasReference, companionReferences);
+    const submittedPrompt = referenceRelationship ? `${referenceRelationship}\n\n${prompt}` : prompt;
     const referenceRequired = this.keyframeReferenceRequired();
     if (referenceRequired && !referenceImagePath) {
       throw Object.assign(
@@ -322,7 +321,7 @@ export class MediaTaskRunner {
       const signature = buildGenerationSignature({
         kind: 'keyframe', frameType, shotId: shot.id, scriptVersionHash: plan?.script_version_id || null,
         generationSpecHash: buildGenerationSignature({ spec }), visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes,
-        promptCompilerVersion: 'keyframe-prompt-v2', prompt, workflowHash: this.provider.workflowHash || null,
+        promptCompilerVersion: 'keyframe-prompt-v3', prompt: submittedPrompt, workflowHash: this.provider.workflowHash || null,
         width: configuration.width || null, height: configuration.height || null, seedList: seed === undefined ? [] : [seed],
       });
       const image = await this.provider.generateImage({
@@ -353,12 +352,12 @@ export class MediaTaskRunner {
         type: frameType === 'end' ? 'shot_endframe_candidate' : 'shot_keyframe_candidate',
         provider: this.provider.provider, model: this.provider.model, objectKey: image.objectKey,
         sizeBytes: image.sizeBytes, generationSignature: signature,
-        metadata: { ...image.metadata, shotId: shot.id, frameType, candidateIndex: index + 1, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetIds, referenceAssetHashes: referenceHashes, primaryReferenceAssetId: primaryReference?.id || null, generationSignature: signature, selected: false },
+        metadata: { ...image.metadata, shotId: shot.id, frameType, candidateIndex: index + 1, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetIds, referenceAssetHashes: referenceHashes, canvasReferenceAssetId: canvasReference?.id || null, primaryReferenceAssetId: canvasReference?.id || null, generationSignature: signature, selected: false },
       });
       updateGenerationTask(this.db, task.id, { progress: Math.round(((index + 1) / count) * 92), updated_at: timestamp() });
     }
     updateSegmentShot(this.db, shot.id, {
-      keyframe_status: 'candidates_ready', keyframe_signature: buildGenerationSignature({ kind: 'keyframe-prompt', prompt, referenceHashes, bibleHash }),
+      keyframe_status: 'candidates_ready', keyframe_signature: buildGenerationSignature({ kind: 'keyframe-prompt-v3', prompt: submittedPrompt, referenceHashes, bibleHash }),
       updated_at: timestamp(),
     });
     updateGenerationTask(this.db, task.id, { status: 'succeeded', current_step: 'completed', progress: 100, configuration_json: JSON.stringify({ ...configuration, seedList }), completed_at: timestamp(), updated_at: timestamp() });
@@ -683,7 +682,7 @@ export function buildImageNegativePrompt(provider, { allowMultiView = false, mus
  * so the first run after a visual-settings change always recompiles.
  */
 export function isGenerationSpecOutdated(spec, bibleHash) {
-  if (!spec || !spec.version) return true;
+  if (!spec || spec.version !== 'generation-spec-v5') return true;
   if (!spec.visualBibleHash) return true;
   return spec.visualBibleHash !== bibleHash;
 }
@@ -777,27 +776,105 @@ function referenceImagePathOf(provider, asset) {
 }
 
 /**
- * 主参考之外的补充参考图：每个类型最多取一张，最多两张。
- * 单图 img2img 工作流会忽略，声明了 referenceImages 的多图编辑工作流会用到。
+ * 关键帧参考图分工（对齐 Qwen-Image-Edit-2509/2511 官方模板）：
+ * - 画布（startImage / referenceImagePath）：场景参考图，会被 ImageScale →
+ *   VAEEncode 接进 KSampler.latent_image，是模型真正“编辑”的那张图；
+ *   有多机位时优先选与镜头机位最接近的一张。
+ * - 参考图 2：角色三视图，只锁定身份、脸、发型、服装、身体比例。
+ * - 参考图 3：同一场景的另一机位，帮助模型理解空间结构。
+ * 没有场景参考图时退回“角色当画布”的旧行为，保证老项目仍能出图。
  */
-function selectCompanionReferenceAssets(db, projectId, assetIds, primary) {
+function selectKeyframeReferenceAssets(db, projectId, assetIds, shot = {}) {
   const ids = new Set((assetIds || []).filter(Boolean));
-  if (!ids.size) return [];
-  const assets = listMediaAssets(db, { projectId }).filter(asset => ids.has(asset.id) && asset.status === 'ready');
-  return ['scene_reference', 'character_reference', 'prop_reference']
-    .map(type => assets.find(asset => asset.type === type && asset.id !== primary?.id))
-    .filter(Boolean)
-    .slice(0, 2);
+  if (!ids.size) return { canvasReference: null, companionReferences: [] };
+  const readyAssets = listMediaAssets(db, { projectId }).filter(asset => asset.status === 'ready');
+  const selectedAssets = readyAssets.filter(asset => ids.has(asset.id));
+  const selectedScene = selectedAssets.find(asset => asset.type === 'scene_reference');
+  const character = selectedAssets.find(asset => asset.type === 'character_reference') || null;
+  const prop = selectedAssets.find(asset => asset.type === 'prop_reference') || null;
+  const prioritizedViews = selectSceneReferenceViews(readyAssets, selectedScene, shot, null, { preferSelected: false });
+  const canvasReference = prioritizedViews[0] || selectedScene || character || prop || null;
+  const companionReferences = [];
+  if (character && character.id !== canvasReference?.id) companionReferences.push(character);
+  const alternateScene = selectSceneReferenceViews(readyAssets, selectedScene, shot, canvasReference?.id)[0];
+  if (alternateScene && alternateScene.id !== canvasReference?.id) companionReferences.push(alternateScene);
+  if (!companionReferences.length && prop && prop.id !== canvasReference?.id) companionReferences.push(prop);
+  return { canvasReference, companionReferences: companionReferences.slice(0, 2) };
 }
 
-function selectPrimaryReferenceAsset(db, projectId, assetIds, preferCharacter = true) {
-  const ids = new Set((assetIds || []).filter(Boolean));
-  if (!ids.size) return null;
-  const assets = listMediaAssets(db, { projectId }).filter(asset => ids.has(asset.id) && asset.status === 'ready');
-  const character = assets.find(asset => asset.type === 'character_reference');
-  const scene = assets.find(asset => asset.type === 'scene_reference');
-  const prop = assets.find(asset => asset.type === 'prop_reference');
-  return preferCharacter ? (character || scene || prop || null) : (scene || character || prop || null);
+function selectSceneReferenceViews(assets, selectedScene, shot, primaryId, { preferSelected = true } = {}) {
+  if (!selectedScene) return [];
+  const entityId = selectedScene.metadata?.entityId;
+  const batchId = selectedScene.metadata?.viewSetId || selectedScene.metadata?.generationTaskId || '';
+  const bibleHash = selectedScene.metadata?.visualBibleHash || '';
+  const related = assets.filter(asset => {
+    if (asset.type !== 'scene_reference' || asset.id === primaryId) return false;
+    if (asset.metadata?.entityId !== entityId) return false;
+    if (batchId) return (asset.metadata?.viewSetId || asset.metadata?.generationTaskId) === batchId;
+    return bibleHash ? asset.metadata?.visualBibleHash === bibleHash : asset.id === selectedScene.id;
+  });
+  const uniqueByVariant = new Map();
+  for (const asset of related) {
+    const key = asset.metadata?.variantId || asset.id;
+    const existing = uniqueByVariant.get(key);
+    if (!existing || String(existing.created_at || '') < String(asset.created_at || '')) uniqueByVariant.set(key, asset);
+  }
+  const priority = sceneViewPriority(shot);
+  return [...uniqueByVariant.values()].sort((a, b) => {
+    if (preferSelected) {
+      if (a.id === selectedScene.id) return -1;
+      if (b.id === selectedScene.id) return 1;
+    }
+    const aIndex = priority.indexOf(a.metadata?.variantId);
+    const bIndex = priority.indexOf(b.metadata?.variantId);
+    return (aIndex < 0 ? 999 : aIndex) - (bIndex < 0 ? 999 : bIndex);
+  }).slice(0, 2);
+}
+
+function sceneViewPriority(shot = {}) {
+  const camera = `${shot.angle || ''} ${shot.composition || ''}`;
+  if (/俯|高机位|鸟瞰/.test(camera)) return ['elevated', 'axis-master', 'eye-level', 'side-45'];
+  if (/侧|四分之三|45/.test(camera)) return ['side-45', 'eye-level', 'axis-master', 'elevated'];
+  return ['eye-level', 'axis-master', 'side-45', 'elevated'];
+}
+
+/**
+ * 只声明每张图的职责。角色与场景的文字设定不在这里重复，后面的关键帧正文
+ * 只描述“在这个场景里做什么、怎么拍、最终画面长什么样”。
+ */
+function buildReferenceRelationshipPrompt(canvasReference, companions = []) {
+  const references = [canvasReference, ...companions].filter(Boolean);
+  if (!references.length) return '';
+  const lines = ['【Reference Image Roles / 参考图关系】'];
+  references.forEach((asset, index) => {
+    const number = index + 1;
+    const kind = asset.metadata?.entityKind;
+    const variant = asset.metadata?.variantLabel || asset.metadata?.variantId || '';
+    if (index === 0 && kind === 'scene') {
+      lines.push(
+        `Reference Image 1: Environment canvas — this is the base image being edited${variant ? ` (${variant})` : ''}.`,
+        'Keep its location, architecture, terrain, spatial layout, main-object positions, scale, materials, lighting atmosphere and color palette.',
+        'Edit this exact place in frame: the result must remain the same location, not a different place and not a pasted-on backdrop.',
+      );
+    } else if (kind === 'character') {
+      lines.push(
+        `Reference Image ${number}: Character design reference (three-view character sheet).`,
+        "Use this image only to preserve the character's identity, face, hairstyle, costume, accessories, body proportions and colors.",
+        'Do not reproduce its multiple-view layout, repeated character figures, plain studio background, labels, borders or character-sheet composition.',
+      );
+    } else if (kind === 'scene') {
+      lines.push(
+        `Reference Image ${number}: Additional environment view of the same location${variant ? ` (${variant})` : ''}.`,
+        'Use it to keep the architecture, terrain, spatial layout and main-object positions consistent across camera angles.',
+      );
+    } else {
+      lines.push(`Reference Image ${number}: Prop or visual continuity reference. Preserve its design and scale; do not copy its presentation layout.`);
+    }
+  });
+  lines.push(
+    'Add the character from the character reference into the environment canvas as a newly composed subject.',
+  );
+  return lines.join('\n');
 }
 function selectedBibleReferenceIds(content) {
   const groups = [content?.characters, content?.scenes, content?.props];

@@ -1,6 +1,6 @@
 {
-  "profileId": "qwen-image-edit-keyframe",
-  "workflowVersion": 1,
+  "profileId": "qwen-image-edit-2511-gguf-keyframe",
+  "workflowVersion": 2,
   "mode": "i2i",
   "positivePrompt": {
     "node": "6",
@@ -8,7 +8,7 @@
   },
   "negativePrompt": {
     "node": "7",
-    "field": "text"
+    "field": "prompt"
   },
   "startImage": {
     "node": "10",
@@ -17,6 +17,10 @@
   "referenceImages": [
     {
       "node": "11",
+      "field": "image"
+    },
+    {
+      "node": "14",
       "field": "image"
     }
   ],

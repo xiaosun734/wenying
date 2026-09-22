@@ -315,7 +315,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const style = resolveVisualStyle(bible, configuration);
   const postproductionElements = unique([...(beat?.postproductionElements || []), ...inferPostproductionElements(plot)]);
   const characterNames = (bible.characters || []).map(item => item.name);
-  const sceneDescription = scenes.map(scene => [
+  const fallbackSceneDescription = scenes.map(scene => [
     scene.name,
     sanitizeReferenceDescription(
       sceneSafeDescription(cleanEntityText(scene.description), { characterNames }),
@@ -326,7 +326,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
     scene.colorPalette ? `色板：${cleanEntityText(scene.colorPalette)}` : '',
     scene.selectedReferenceAssetId ? `以已确认的场景母版参考图为准，空间结构、陈设位置和光线不得改变` : '',
   ].filter(Boolean).join('：')).join('；');
-  const characterIdentity = characters.map(character => [
+  const fallbackCharacterIdentity = characters.map(character => [
     character.name,
     character.age ? `年龄${cleanEntityText(character.age)}` : '',
     characterSafeAppearance(cleanEntityText(character.face)),
@@ -352,17 +352,46 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const startState = text(beat?.startState, 200) || (visibleAction ? '动作开始前保持当前人物和场景状态' : '');
   const endState = text(beat?.endState, 200) || (visibleAction ? '动作完成后保持当前状态' : '');
   const exactTextInPost = postproductionElements.some(item => /精确.*文字|后期叠加/.test(item));
-  const keyframePrompt = [
-    characterIdentity,
-    sceneDescription,
-    propDescription,
-    startState,
-    camera,
-    style,
-    '静态关键帧：单幅完整电影画面，只确定人物身份、场景、道具、构图、光线和动作起始状态',
-    '禁止上下分屏、多格漫画、拼贴、重复人物、可读字幕或可读数字',
-    '不包含对白字幕，不提前出现后续事件实体',
-  ].filter(Boolean).join('；');
+  const hasCharacterReference = characters.some(character => character.selectedReferenceAssetId);
+  const hasSceneReference = scenes.some(scene => scene.selectedReferenceAssetId);
+  const characterPrompt = hasCharacterReference
+    ? characters.map(character => `角色：${character.name}。角色身份与外观只取自角色参考图，不重新设计人物，不复制参考图的排版或背景`).join('\n')
+    : fallbackCharacterIdentity;
+  const scenePrompt = hasSceneReference
+    ? scenes.map(scene => `地点：${scene.name}。环境、空间结构、建筑布局、地形、主要物体位置、尺度、材质、光照和氛围只取自场景参考图，不重新设计场景`).join('\n')
+    : fallbackSceneDescription;
+  const requiredElements = mustShow.filter(item => (
+    !characters.some(character => character.name === item)
+    && !scenes.some(scene => scene.name === item)
+  ));
+  const sceneNames = scenes.map(scene => scene.name).filter(Boolean).join('、') || '当前场景';
+  const characterNamesInShot = characters.map(character => character.name).filter(Boolean).join('、') || '画面主体';
+  const lightingPrompt = hasSceneReference
+    ? '沿用场景参考图的主光方向、色温、环境光和阴影方向；人物受光、接触阴影和反射色必须与环境一致'
+    : scenes.map(scene => cleanEntityText(scene.lighting)).filter(Boolean).join('；');
+  // 有锁定参考图时，参考图负责“角色长什么样、场景在哪里”，正文只写“角色在这个
+  // 场景里做什么、怎么拍、画面最终长什么样”。实测（同一工作流、同一种子、同一画布）：
+  // 短句平铺能稳定把角色放进场景；把人物设定、场景设定、光照、一致性要求全部展开成
+  // 多段规格说明后，参考图的控制力会被冲掉，模型会退回成“单独画一个人”。
+  const keyframePrompt = hasCharacterReference || hasSceneReference
+    ? buildReferenceKeyframePrompt({
+        hasCharacterReference, characterNamesInShot, sceneNames, visibleAction, plot,
+        shot, camera, style,
+      })
+    : [
+        '【最终关键帧】',
+        `【角色】\n${characterPrompt}`,
+        `【场景】\n${scenePrompt}`,
+        [propDescription, requiredElements.length ? `必须出现：${requiredElements.join('、')}` : ''].filter(Boolean).length
+          ? `【道具与画面要素】\n${[propDescription, requiredElements.length ? `必须出现：${requiredElements.join('、')}` : ''].filter(Boolean).join('；')}`
+          : '',
+        `【动作】\n动作起始状态：${startState || '保持自然静止'}\n画面动作：${visibleAction || plot || '主体处于当前剧情状态'}`,
+        `【角色与环境关系】\n${characterNamesInShot}位于${sceneNames}中；${shot?.composition ? `空间位置与构图：${shot.composition}` : '人物站立面、尺度、遮挡关系与场景透视一致'}；人物必须接触场景地面或合理承载物，不得像贴纸悬浮在背景前方`,
+        `【镜头】\n景别：${shot?.shotSize || '中景'}\n机位：${shot?.angle || '平视'}\n镜头运动：${shot?.movement || '固定镜头'}\n焦距 / 视觉效果：${shot?.focalLengthMm ? `${shot.focalLengthMm}mm` : '自然透视'}\n构图：${shot?.composition || camera || '主体与场景关系清楚'}`,
+        `【光照】\n${lightingPrompt || '人物和场景使用统一、可信的主光、环境光与阴影关系'}`,
+        `【画面风格】\n${style}`,
+        `【一致性要求】\n保持角色身份一致；保持服装、发型、脸部特征、身体比例一致；保持场景建筑、地形和主要物体的位置关系一致；角色必须正确融入场景透视、光照和色彩环境；避免比例错误、透视错误、光照不一致、重复人物、上下分屏、多格漫画、拼贴、可读字幕或可读数字${mustNotShow.length ? `；不得出现：${mustNotShow.join('、')}` : ''}`,
+      ].filter(Boolean).join('\n\n');
   const environmentDynamics = audioOnlyEvents.length
     ? '保留画外声源造成的可见环境反应，但不得把画外实体具象化'
     : '按当前动作自然带动环境动态';
@@ -377,7 +406,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const sanitizedKeyframePrompt = exactTextInPost ? replaceExactScreenText(keyframePrompt) : keyframePrompt;
   const sanitizedMotionPrompt = exactTextInPost ? replaceExactScreenText(motionPrompt) : motionPrompt;
   return {
-    version: 'generation-spec-v2',
+    version: 'generation-spec-v5',
     visualBibleHash: visualBibleContentHash(bible),
     plot,
     visibleSubject: characters.map(character => character.name).join('、'),
@@ -403,6 +432,52 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
     motionPrompt: sanitizedMotionPrompt,
   };
 }
+
+/**
+ * 有锁定参考图时的关键帧正文：短句平铺，只写“做什么、谁在哪、怎么拍、什么风格”。
+ * 角色外观与场景结构交给参考图，不再复述设定；本镜头 mustNotShow 只进负向提示词，
+ * 不写进正向提示词（正向里出现负面概念反而会把画面推向那些概念）。
+ */
+function buildReferenceKeyframePrompt({
+  hasCharacterReference, characterNamesInShot, sceneNames, visibleAction, plot,
+  shot, camera, style,
+}) {
+  const subject = hasCharacterReference ? characterNamesInShot : '画面主体';
+  const actionMoment = stripLeadingSubject(firstClause(visibleAction || plot || '主体处于当前剧情状态'), subject);
+  const cameraLine = [
+    shot?.shotSize || '中景',
+    shot?.angle || '平视',
+    shot?.focalLengthMm ? `${shot.focalLengthMm}mm` : '',
+    shot?.composition || camera || '',
+  ].filter(Boolean).join('，');
+  return [
+    '【最终关键帧】',
+    hasCharacterReference
+      ? '把角色参考图中的角色放进场景参考图的环境中，生成这个镜头的一帧画面。'
+      : '以场景参考图为基准，生成这个镜头的一帧画面。',
+    `角色：${subject}，${actionMoment}。`,
+    `${subject}位于${sceneNames}中，与场景透视、比例、地面接触、光照和阴影一致。`,
+    cameraLine ? `镜头：${cameraLine}。` : '',
+    `画面风格：${style}`,
+    '生成单张电影感关键帧，不要拼贴、分屏或多格。',
+  ].filter(Boolean).join('\n');
+}
+
+/** 只取动作的第一个分句：关键帧是静止的一瞬间，不写“先……随后……”的时间推进。 */
+function firstClause(value) {
+  const textValue = String(value || '').trim();
+  if (!textValue) return '';
+  return textValue.split(/[；;。]/)[0].trim() || textValue;
+}
+
+/** “角色：张元，张元位于人群中……”读起来像两个主体，去掉动作句开头重复的主语。 */
+function stripLeadingSubject(value, subject) {
+  const textValue = String(value || '').trim();
+  if (!subject || !textValue.startsWith(subject)) return textValue;
+  const rest = textValue.slice(subject.length).replace(/^[，,、：:。\s]+/, '').trim();
+  return rest || textValue;
+}
+
 function validateDirectorAnalysis(value, segments) {
   if (!Array.isArray(value?.segments)) throw invalid('导演分析缺少 segments');
   const normalized = value.segments.map(item => ({

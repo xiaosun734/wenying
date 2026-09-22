@@ -18,11 +18,16 @@ const workflowPath = resolve(root, workflowArg || 'workflows/qwen-image-edit-key
 const manifestPath = resolve(root, manifestArg || 'workflows/manifests/qwen-image-edit-keyframe.json');
 
 const MODEL_INPUTS = Object.freeze({
-  unetloader: ['unet_name', 'diffusion_models'],
-  checkpointloadersimple: ['ckpt_name', 'checkpoints'],
-  cliploader: ['clip_name', 'text_encoders'],
-  vaelloader: ['vae_name', 'vae'],
-  loraloader: ['lora_name', 'loras'],
+  unetloader: ['unet_name', ['diffusion_models']],
+  // GGUF 权重的物理位置还是 models/diffusion_models，但 ComfyUI 的 diffusion_models
+  // 目录只认 .safetensors 等扩展名，.gguf 要通过 unet_gguf / clip_gguf 这两个
+  // 目录键才查得到（ComfyUI-GGUF 注册，扫描同一批目录、只保留 .gguf）。
+  unetloadergguf: ['unet_name', ['unet_gguf', 'diffusion_models']],
+  checkpointloadersimple: ['ckpt_name', ['checkpoints']],
+  cliploader: ['clip_name', ['text_encoders']],
+  cliploadergguf: ['clip_name', ['clip_gguf', 'text_encoders']],
+  vaelloader: ['vae_name', ['vae']],
+  loraloader: ['lora_name', ['loras']],
 });
 
 let failed = false;
@@ -83,15 +88,23 @@ if (!baseUrl) {
 } else {
   const folders = new Map();
   for (const item of required) {
-    if (!folders.has(item.folder)) folders.set(item.folder, await listModels(baseUrl, item.folder));
+    for (const folder of item.folders) {
+      if (!folders.has(folder)) folders.set(folder, await listModels(baseUrl, folder));
+    }
   }
   for (const item of required) {
-    const list = folders.get(item.folder) || [];
-    if (list.some(name => String(name).toLowerCase() === item.file.toLowerCase())) {
-      console.log('✓ ' + item.folder + '/' + item.file);
+    const readable = item.folders.filter(folder => Array.isArray(folders.get(folder)));
+    const hit = readable.find(folder => folders.get(folder)
+      .some(name => String(name).toLowerCase() === item.file.toLowerCase()));
+    if (hit) {
+      console.log('✓ ' + hit + '/' + item.file);
     } else {
       failed = true;
-      console.error('× 缺少模型：' + item.folder + '/' + item.file + '（节点 ' + item.node + ' ' + item.classType + '）');
+      if (!readable.length) {
+        console.error('× 无法读取模型目录：' + item.folders.join(' / '));
+      } else {
+        console.error('× 缺少模型：' + item.file + '（节点 ' + item.node + ' ' + item.classType + '，查过 ' + readable.join(' / ') + '）');
+      }
     }
   }
 }
@@ -100,15 +113,16 @@ console.log('');
 if (failed) {
   console.log('下一步：');
   console.log('  1. 把上面缺的模型文件放到远程 ComfyUI 的 models/<对应目录>/');
-  console.log('     · Qwen-Image-Edit-2509（Comfy-Org 打包的 fp8 权重）→ models/diffusion_models/');
-  console.log('     · Qwen2.5-VL-7B 文本编码器 qwen_2.5_vl_7b_fp8_scaled.safetensors → models/text_encoders/');
+  console.log('     · Qwen-Image-Edit-2511 主模型 qwen-image-edit-2511-Q4_K_M.gguf → models/diffusion_models/');
+  console.log('     · Qwen2.5-VL-7B 文本编码器 Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf → models/text_encoders/');
   console.log('     · VAE 用已有的 qwen_image_vae.safetensors');
+  console.log('     · GGUF 权重需要远程 ComfyUI 装好自定义节点 ComfyUI-GGUF（city96），否则 UnetLoaderGGUF / CLIPLoaderGGUF 不存在');
   console.log('  2. 全部 ✓ 之后，改 .env：');
   console.log('     COMFYUI_KEYFRAME_WORKFLOW_PATH=./workflows/qwen-image-edit-keyframe-api.json');
   console.log('     COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH=./workflows/manifests/qwen-image-edit-keyframe.json');
   console.log('     COMFYUI_KEYFRAME_DENOISE=1');
-  console.log('     （编辑工作流从空 latent 起采样，denoise 应为 1；旧 img2img 工作流才用 0.82）');
-  console.log('  3. 重启服务，日志出现 “ComfyUI keyframe 工作流：i2i / qwen-image-edit-keyframe” 即生效');
+  console.log('     （编辑工作流把场景画布经 VAEEncode 接进 latent_image，denoise 应为 1；旧 img2img 工作流才用 0.82）');
+  console.log('  3. 重启服务，日志出现 “ComfyUI keyframe 工作流：i2i / qwen-image-edit-2511-gguf-keyframe” 即生效');
   process.exitCode = 1;
 } else {
   console.log('全部就绪：可以按上面的 .env 切换关键帧工作流。');
@@ -121,7 +135,7 @@ function collectModelRefs(workflow) {
     if (!mapping) continue;
     const file = node?.inputs?.[mapping[0]];
     if (!file || typeof file !== 'string') continue;
-    refs.push({ node: nodeId, classType: node.class_type, folder: mapping[1], file });
+    refs.push({ node: nodeId, classType: node.class_type, folders: mapping[1], file });
   }
   return refs;
 }
@@ -140,15 +154,11 @@ async function fetchNodeSpec(baseUrl, classType) {
 async function listModels(baseUrl, folder) {
   try {
     const response = await fetch(baseUrl + '/models/' + encodeURIComponent(folder));
-    if (!response.ok) {
-      console.error('× 读取 ' + folder + ' 列表失败：HTTP ' + response.status);
-      return [];
-    }
+    if (!response.ok) return null;
     const list = await response.json();
-    return Array.isArray(list) ? list : [];
-  } catch (error) {
-    console.error('× 读取 ' + folder + ' 列表失败：' + error.message);
-    return [];
+    return Array.isArray(list) ? list : null;
+  } catch {
+    return null;
   }
 }
 

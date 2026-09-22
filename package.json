@@ -11,6 +11,7 @@
     "start": "node server.mjs",
     "test": "node --test",
     "verify": "node scripts/verify-accuracy.mjs",
-    "check:keyframe-edit": "node scripts/check-keyframe-edit.mjs"
+    "check:keyframe-edit": "node scripts/check-keyframe-edit.mjs",
+    "inspect:keyframe": "node --no-warnings scripts/inspect-keyframe.mjs"
   }
 }

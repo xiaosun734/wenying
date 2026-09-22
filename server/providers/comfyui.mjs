@@ -199,7 +199,10 @@ export class ComfyUiMediaProvider {
     const companionSlots = Array.isArray(manifest?.referenceImages) ? manifest.referenceImages.length : 0;
     const uploadedCompanions = [];
     if (useReference && companionSlots > 0) {
-      for (const companionPath of referenceImagePaths.slice(0, companionSlots)) {
+      const mappedPaths = referenceImagePaths.filter(Boolean).slice(0, companionSlots);
+      const fallbackPath = mappedPaths.at(-1) || referenceImagePath;
+      while (mappedPaths.length < companionSlots && fallbackPath) mappedPaths.push(fallbackPath);
+      for (const companionPath of mappedPaths) {
         if (!companionPath) continue;
         const uploaded = await this.uploadInputImage(clientId, companionPath);
         if (uploaded) uploadedCompanions.push(uploaded);

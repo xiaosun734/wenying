@@ -145,7 +145,7 @@ async function createReadyScript() {
   });
   assert.equal(response.status, 202);
   const task = await waitForTask(runner, body.task.id);
-  assert.equal(task.status, 'succeeded');
+  assert.equal(task.status, 'succeeded', task.error_message || task.error_code || 'keyframe task failed');
   const state = await request(`/projects/${project.id}`);
   return { project, task, state: state.body };
 }
@@ -521,7 +521,7 @@ test('locks references, generates and confirms keyframes, then gates I2V generat
     });
     assert.equal(started.response.status, 202);
     const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
-    assert.equal(task.status, 'succeeded');
+    assert.equal(task.status, 'succeeded', task.error_message || task.error_code || 'keyframe task failed');
   }
 
   state = (await request(`/projects/${project.id}`)).body;
@@ -563,7 +563,7 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   assert.ok(planned.body.storyboardPlan.shotSelection.segments.length >= 1);
   const firstShot = planned.body.segments[0].shots[0];
   assert.ok(firstShot.plot && firstShot.shotSize && firstShot.movement && firstShot.angle && firstShot.purpose);
-  assert.equal(firstShot.generationSpec.version, 'generation-spec-v2');
+  assert.equal(firstShot.generationSpec.version, 'generation-spec-v5');
   assert.ok(firstShot.generationSpec.visibleAction);
   assert.ok(firstShot.generationSpec.motionPrompt);
   assert.ok(firstShot.focalLengthMm >= 12);
@@ -684,10 +684,10 @@ test('keyframe task hands both the character and the scene reference to the imag
   const scene = state.visualBible.content.scenes[0];
   assert.ok(character?.entityId && scene?.entityId);
 
-  for (const entity of [{ kind: 'character', id: character.entityId }, { kind: 'scene', id: scene.entityId }]) {
+  for (const entity of [{ kind: 'character', id: character.entityId, count: 1 }, { kind: 'scene', id: scene.entityId, count: 4 }]) {
     const batch = await request(`/projects/${project.id}/reference-assets`, {
       method: 'POST', headers: { 'idempotency-key': `reference-${entity.kind}-${project.id}` },
-      body: JSON.stringify({ entityKind: entity.kind, entityId: entity.id, count: 1 }),
+      body: JSON.stringify({ entityKind: entity.kind, entityId: entity.id, count: entity.count }),
     });
     assert.equal(batch.response.status, 202);
     const task = await waitForGenerationTask(mediaRunner, batch.body.task.id);
@@ -713,12 +713,22 @@ test('keyframe task hands both the character and the scene reference to the imag
   });
   assert.equal(started.response.status, 202);
   const task = await waitForGenerationTask(mediaRunner, started.body.task.id);
-  assert.equal(task.status, 'succeeded');
+  assert.equal(task.status, 'succeeded', task.error_message || task.error_code || 'keyframe task failed');
   assert.equal(mediaProvider.imageCalls.length, 1);
 
   const call = mediaProvider.imageCalls[0];
   assert.ok(call.referenceImagePath, '必须提供主参考图');
-  assert.equal(call.referenceImagePaths.length, 1, '另一类参考图要作为补充参考图一起传给 provider');
+  assert.match(call.referenceImagePath, /reference_scene_/, '画布必须是场景图：它会经 VAEEncode 接进采样器的 latent_image');
+  assert.equal(call.referenceImagePaths.length, 2, '角色三视图 + 另一机位场景图要一起传给 provider');
   assert.notEqual(call.referenceImagePath, call.referenceImagePaths[0]);
-  assert.match(call.prompt, /把这个角色自然地放进该场景/);
+  assert.match(call.prompt, /Reference Image 1: Environment canvas/);
+  assert.match(call.prompt, /Reference Image 2: Character design reference/);
+  assert.match(call.prompt, /Reference Image 3: Additional environment view/);
+  assert.match(call.prompt, /Do not reproduce its multiple-view layout/);
+  assert.match(call.prompt, /Add the character from the character reference into the environment canvas/);
+  assert.match(call.prompt, /把角色参考图中的角色放进场景参考图/);
+  assert.match(call.prompt, /\n镜头：/);
+  assert.match(call.prompt, /\n角色：/);
+  assert.doesNotMatch(call.prompt, /【角色】|【场景】/, '有锁定参考图时不复述整套设定');
+  assert.doesNotMatch(call.prompt, /年龄|发型发色|固定服装/);
 });

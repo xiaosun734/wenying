@@ -44,14 +44,14 @@ test('builds an executable generation spec without leaking abstract narrative pu
     style: '日系二维动画电影风格',
   };
   const spec = buildGenerationSpec(shot, beat, bible, { visualStyle: 'anime' });
-  assert.equal(spec.version, 'generation-spec-v2');
+  assert.equal(spec.version, 'generation-spec-v5');
   assert.ok(spec.mustShow.includes('沈砚'));
   assert.ok(spec.mustNotShow.includes('列车实体'));
   assert.ok(spec.mustNotShow.includes('女人实体'));
   assert.ok(spec.audioOnlyEvents.length >= 1);
   assert.match(spec.keyframePrompt, /短黑发/);
   assert.doesNotMatch(spec.motionPrompt, /短黑发|黑色西装/);
-  assert.match(spec.keyframePrompt, /静态关键帧/);
+  assert.match(spec.keyframePrompt, /【最终关键帧】/);
   assert.doesNotMatch(spec.motionPrompt, /列车/);
   assert.doesNotMatch(spec.motionPrompt, /叙事目的/);
 });
@@ -79,6 +79,14 @@ test('builds a three-view character sheet in the project style without plot text
   assert.doesNotMatch(prompt, /坐起|按在/);
   assert.doesNotMatch(prompt, /没有手机/);
   assert.match(prompt, /白色葬礼胸花/);
+});
+
+test('scene reference variants are generic camera views of the same location', () => {
+  const variants = referenceVariants('scene');
+  assert.deepEqual(variants.map(item => item.id), ['axis-master', 'eye-level', 'side-45', 'elevated']);
+  assert.ok(variants.every(item => /同一场景/.test(item.instruction)));
+  assert.ok(variants.every(item => !/站台|隧道|电子屏|广播/.test(item.instruction)));
+  assert.match(variants.find(item => item.id === 'eye-level').instruction, /只改变摄影机位置/);
 });
 
 test('scene descriptions drop character actions and body sensations', () => {
@@ -151,7 +159,7 @@ test('repairs cross-beat evidence ids instead of failing the whole camera stage'
   }
 });
 
-test('strips unspecified clauses and locks user-defined appearance into keyframe prompts', () => {
+test('uses a locked character reference without restating the whole three-view design', () => {
   const bible = {
     characters: [{
       name: '沈砚',
@@ -166,18 +174,20 @@ test('strips unspecified clauses and locks user-defined appearance into keyframe
   };
   const spec = buildGenerationSpec({ plot: '沈砚从站台上醒来。', shotSize: '中景', angle: '平视' }, {}, bible, {});
   assert.doesNotMatch(spec.keyframePrompt, /未交代/);
-  assert.match(spec.keyframePrompt, /28 岁/);
-  assert.match(spec.keyframePrompt, /短黑发/);
-  assert.match(spec.keyframePrompt, /深色正式服装/);
-  assert.match(spec.keyframePrompt, /以已确认的角色参考图为准/);
+  assert.doesNotMatch(spec.keyframePrompt, /28 岁|短黑发|深色正式服装/);
+  assert.match(spec.keyframePrompt, /把角色参考图中的角色放进场景参考图/);
+  assert.match(spec.keyframePrompt, /保持角色外观与参考图一致|与场景透视、比例、地面接触、光照和阴影一致/);
+  assert.doesNotMatch(spec.keyframePrompt, /【角色】/, '有锁定参考图时不再复述整套角色设定');
   assert.ok(spec.visualBibleHash, 'generation spec must carry the visual bible hash');
 });
 
 test('recompiles generation specs that were built before or from another visual bible', () => {
   assert.equal(isGenerationSpecOutdated(null, 'bible-hash'), true);
-  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2' }, 'bible-hash'), true);
-  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'old-hash' }, 'bible-hash'), true);
-  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'bible-hash' }, 'bible-hash'), false);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'bible-hash' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v3', visualBibleHash: 'bible-hash' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5', visualBibleHash: 'old-hash' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5', visualBibleHash: 'bible-hash' }, 'bible-hash'), false);
 });
 
 test('regenerates legacy empty subtitle assets so burn-in is not silently skipped', async () => {

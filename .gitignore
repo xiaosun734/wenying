@@ -5,3 +5,6 @@ data/
 *.sqlite-wal
 # dev server logs
 *.log
+# 本地排查产生的临时产物
+tmp-test/
+tmp-*.json

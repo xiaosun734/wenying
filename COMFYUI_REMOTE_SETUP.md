@@ -127,23 +127,36 @@ pnpm dev
              -> 前端播放 /media/projects/.../video.mp4
 ```
 
-## 6. 关键帧的多图参考模式（Qwen-Image-Edit-2509）
+## 6. 关键帧的多图参考模式（Qwen-Image-Edit-2511 GGUF）
 
 默认的关键帧工作流是单图 img2img（Krea2），它只能接收**一张**参考图。镜头同时有角色和场景参考图时，服务只会把主参考图（有可见主体的镜头优先角色三视图）交给模型，场景只以文字形式出现在提示词里。模型为了同时满足“保持这张设定图”和“画出提示词里的场景”，往往会交出一张上下拼贴的画面，景别也听不进分镜表。
 
-多图参考模式改用 Qwen-Image-Edit-2509 的图像编辑节点 `TextEncodeQwenImageEditPlus`（支持 image1 / image2 / image3 三个参考输入），把角色参考图和场景母版一起送进模型，并在提示词前面补一句“把这个角色自然地放进该场景”的合成指令。
+多图参考模式改用 Qwen-Image-Edit-2511 的图像编辑节点 `TextEncodeQwenImageEditPlus`（支持 image1 / image2 / image3 三个参考输入），把角色参考图和场景母版一起送进模型，并在提示词前面补一句“把这个角色自然地放进该场景”的合成指令。
+
+工作流用的是 GGUF 量化权重（Q4_K_M，主模型 12.3 GB），比 fp8 版本少下近一半体积，显存峰值也更低。2511 相比 2509 的主要改进是减轻画面漂移、提升角色一致性、内置部分社区 LoRA，正好对应“人物被硬拼进场景、镜头不听分镜”这类问题。
 
 ### 需要的模型文件
 
 | 文件 | 放到远程 ComfyUI 的目录 | 说明 |
 | --- | --- | --- |
-| `qwen_image_edit_2509_fp8_e4m3fn.safetensors` | `models/diffusion_models/` | Qwen-Image-Edit-2509 主模型（Comfy-Org 打包的 fp8 权重） |
-| `qwen_2.5_vl_7b_fp8_scaled.safetensors` | `models/text_encoders/` | Qwen2.5-VL-7B 文本编码器 |
+| `qwen-image-edit-2511-Q4_K_M.gguf` | `models/diffusion_models/` | Qwen-Image-Edit-2511 主模型（unsloth GGUF，12.3 GB） |
+| `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` | `models/text_encoders/` | Qwen2.5-VL-7B 文本编码器（unsloth GGUF，4.4 GB） |
 | `qwen_image_vae.safetensors` | `models/vae/` | 该机已有，无需重复下载 |
+
+下载地址：
+
+- https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/resolve/main/qwen-image-edit-2511-Q4_K_M.gguf
+- https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf
+
+想再省空间可以把主模型换成 `Q3_K_M`（9.2 GB）或 `Q2_K`（7.0 GB），只要把工作流 JSON 里节点 `1` 的 `unet_name` 改成对应文件名即可；Q2_K 画质下降明显，不建议。
+
+### 自定义节点
+
+GGUF 权重需要远程 ComfyUI 安装 **ComfyUI-GGUF**（作者 city96，ComfyUI Manager 里搜 “GGUF” 即可）。装好后节点列表里会出现 `UnetLoaderGGUF` 和 `CLIPLoaderGGUF`，工作流正是用这两个节点加载模型；没装时 `npm run check:keyframe-edit` 会直接报“class_type 在当前 ComfyUI 上不存在”。
 
 ### 切换步骤
 
-1. 下载模型并放到上面的目录。
+1. 安装 ComfyUI-GGUF，下载模型并放到上面的目录。
 2. 自检（会校验工作流 / manifest 配对，并逐个检查模型文件是否存在）：
 
    ```bash
@@ -159,12 +172,25 @@ pnpm dev
    COMFYUI_KEYFRAME_DENOISE=1
    ```
 
-   `denoise` 必须是 1：编辑工作流从空 latent 起采样，参考图通过条件注入；旧的 img2img 工作流才用 0.82。
+    `denoise` 必须是 1：编辑工作流把场景画布经 `VAEEncode` 接进 `latent_image`（场景图是"被编辑的那张图"），角色三视图作为条件参考注入；旧的 img2img 工作流才用 0.82。
 4. 重启服务，日志出现下面这行即生效：
 
    ```text
-   ComfyUI keyframe 工作流：i2i / qwen-image-edit-keyframe
+   ComfyUI keyframe 工作流：i2i / qwen-image-edit-2511-gguf-keyframe
    ```
+
+### 采样参数
+
+2511 的官方推荐参数与 2509 不同，工作流已经按 2511 的设置写好：
+
+| 参数 | 当前值 | 说明 |
+| --- | --- | --- |
+| KSampler steps | 20 | 官方给 Comfy 档位的值；追求质量可以提到 40 |
+| KSampler cfg | 4 | 2511 的官方值（2509 是 2.5），配合 CFGNorm 使用 |
+| ModelSamplingAuraFlow shift | 3.1 | 2511 官方模板的值 |
+| denoise | 1 | 由 `COMFYUI_KEYFRAME_DENOISE` 控制，编辑工作流固定为 1 |
+
+工作流的负向分支同样是 `TextEncodeQwenImageEditPlus`，并且和正向一样接收角色图与场景图；两条条件链最后的 `FluxKontextMultiReferenceLatentMethod`（`index_timestep_zero`）来自 2511 官方模板，用来指定多张参考图的 latents 合并方式。
 
 想回到单图 img2img，把上面三行换回 `krea2-keyframe-img2img-api.json` / `krea2-keyframe-img2img.json` / `COMFYUI_KEYFRAME_DENOISE=0.82` 即可。
 

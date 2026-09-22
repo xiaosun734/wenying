@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { resolve } from 'node:path';
 import { ComfyUiMediaProvider, compileNegativePrompt, wanFrameCount } from '../server/providers/comfyui.mjs';
-import { inferWorkflowMode, loadWorkflowManifest, validateWorkflowForManifest, verifyWorkflowPair } from '../server/workflow-manifest.mjs';
+import { applyWorkflowManifest, inferWorkflowMode, loadWorkflowManifest, validateWorkflowForManifest, verifyWorkflowPair } from '../server/workflow-manifest.mjs';
 
 test('ComfyUI provider submits workflow and downloads the generated video', async () => {
   const root = await mkdtemp(join(tmpdir(), 'wenying-comfyui-'));
@@ -440,18 +440,96 @@ test('multi reference manifests upload every reference image for edit workflows'
       referenceImagePaths: [scenePath],
     });
 
-    assert.equal(uploads, 2, '主参考图与场景参考图都要上传');
+    assert.equal(uploads, 3, '主参考图和两个场景参考槽都要有有效上传图');
     assert.equal(submittedPrompt['10'].inputs.image, 'wenying/test/reference-1.png');
     assert.equal(submittedPrompt['11'].inputs.image, 'wenying/test/reference-2.png');
+    assert.equal(submittedPrompt['14'].inputs.image, 'wenying/test/reference-3.png');
     assert.match(submittedPrompt['6'].inputs.prompt, /张元站在人群中/);
-    assert.equal(submittedPrompt['7'].inputs.text, '分格，拼贴');
+    assert.equal(submittedPrompt['7'].inputs.prompt, '分格，拼贴');
+    assert.equal(submittedPrompt['7'].inputs.image1[0], '5', '负向分支也要带上被编辑的场景画布');
+    assert.equal(submittedPrompt['7'].inputs.image2[0], '11', '负向分支也要带上角色参考图');
     assert.equal(submittedPrompt['5'].inputs.width, 576);
     assert.equal(submittedPrompt['5'].inputs.height, 1024);
     assert.equal(submittedPrompt['3'].inputs.denoise, 1);
     assert.equal(result.metadata.startImage, true);
-    assert.equal(result.metadata.referenceImagesUsed, 1);
+    assert.equal(result.metadata.referenceImagesUsed, 2);
     assert.deepEqual(result.metadata.companionReferenceImagePaths, [scenePath]);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+test('keeps the Qwen-Image-Edit-2511 GGUF keyframe workflow aligned with the official template', async () => {
+  const workflowPath = resolve('workflows/qwen-image-edit-keyframe-api.json');
+  const manifestPath = resolve('workflows/manifests/qwen-image-edit-keyframe.json');
+  const workflow = JSON.parse(await readFile(workflowPath, 'utf8'));
+  const manifest = await loadWorkflowManifest(manifestPath);
+
+  // 2511 走 GGUF：加载器必须是 GGUF 版本，否则远程 ComfyUI 找不到权重。
+  assert.equal(workflow['1'].class_type, 'UnetLoaderGGUF');
+  assert.match(workflow['1'].inputs.unet_name, /^qwen-image-edit-2511-.+\.gguf$/);
+  assert.equal(workflow['2'].class_type, 'CLIPLoaderGGUF');
+  assert.equal(workflow['2'].inputs.type, 'qwen_image');
+  assert.match(workflow['2'].inputs.clip_name, /^Qwen2\.5-VL-7B-Instruct-.+\.gguf$/);
+
+  // 2511 官方参数与 2509 不同：cfg 4（2509 是 2.5）、shift 3.1（2509 是 3）。
+  assert.equal(workflow['3'].inputs.cfg, 4);
+  assert.equal(workflow['3'].inputs.steps, 20);
+  assert.equal(workflow['50'].inputs.shift, 3.1);
+  assert.equal(workflow['60'].class_type, 'CFGNorm');
+  assert.deepEqual(workflow['60'].inputs.model, ['50', 0]);
+  assert.deepEqual(workflow['3'].inputs.model, ['60', 0]);
+
+  // 正负两路都接参考图，并各自带一个多参考 latents 声明。
+  for (const nodeId of ['6', '7']) {
+    assert.equal(workflow[nodeId].class_type, 'TextEncodeQwenImageEditPlus');
+    assert.deepEqual(workflow[nodeId].inputs.image1, ['5', 0]);
+    assert.deepEqual(workflow[nodeId].inputs.image2, ['11', 0]);
+    assert.deepEqual(workflow[nodeId].inputs.image3, ['14', 0]);
+  }
+
+  // 官方 2511 模板把 image1 经缩放后 VAEEncode 成采样器的 latent_image：
+  // image1 是"被编辑的画布"，所以它必须是场景图，角色只能当补充参考图。
+  assert.equal(workflow['5'].class_type, 'ImageScale');
+  assert.deepEqual(workflow['5'].inputs.image, ['10', 0]);
+  assert.equal(workflow['5'].inputs.width, 576);
+  assert.equal(workflow['5'].inputs.height, 1024);
+  assert.equal(workflow['15'].class_type, 'VAEEncode');
+  assert.deepEqual(workflow['15'].inputs.pixels, ['5', 0]);
+  assert.deepEqual(workflow['15'].inputs.vae, ['4', 0]);
+  assert.deepEqual(workflow['3'].inputs.latent_image, ['15', 0]);
+  assert.equal(workflow['12'].class_type, 'FluxKontextMultiReferenceLatentMethod');
+  assert.equal(workflow['13'].class_type, 'FluxKontextMultiReferenceLatentMethod');
+  assert.deepEqual(workflow['12'].inputs.conditioning, ['6', 0]);
+  assert.deepEqual(workflow['13'].inputs.conditioning, ['7', 0]);
+  assert.equal(workflow['12'].inputs.reference_latents_method, 'index_timestep_zero');
+  assert.equal(workflow['13'].inputs.reference_latents_method, 'index_timestep_zero');
+  assert.deepEqual(workflow['3'].inputs.positive, ['12', 0]);
+  assert.deepEqual(workflow['3'].inputs.negative, ['13', 0]);
+
+  // manifest 要把运行时的提示词、参考图、seed、尺寸写到 2511 工作流的对应节点。
+  const prepared = structuredClone(workflow);
+  applyWorkflowManifest(prepared, manifest, {
+    positivePrompt: '把角色放进广场',
+    negativePrompt: '分格，拼贴',
+    startImage: 'wenying/test/character.png',
+    referenceImages: ['wenying/test/scene-front.png', 'wenying/test/scene-side.png'],
+    seed: 7,
+    width: 576,
+    height: 1024,
+    denoise: 1,
+  });
+  assert.equal(prepared['6'].inputs.prompt, '把角色放进广场');
+  assert.equal(prepared['7'].inputs.prompt, '分格，拼贴');
+  assert.equal(prepared['10'].inputs.image, 'wenying/test/character.png');
+  assert.equal(prepared['11'].inputs.image, 'wenying/test/scene-front.png');
+  assert.equal(prepared['14'].inputs.image, 'wenying/test/scene-side.png');
+  assert.equal(prepared['3'].inputs.seed, 7);
+  assert.equal(prepared['3'].inputs.denoise, 1);
+  assert.equal(prepared['5'].inputs.width, 576);
+  assert.equal(prepared['5'].inputs.height, 1024);
+
+  const pair = await verifyWorkflowPair(workflowPath, manifestPath);
+  assert.equal(pair.mode, 'i2i');
+  assert.equal(pair.mode, pair.declaredMode);
 });

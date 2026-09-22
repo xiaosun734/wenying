@@ -198,6 +198,9 @@ const MODE_CONTRACT = Object.freeze({
 const LENGTH_INPUT_NODES = ['wan22imagetovideolatent', 'wanimagetovideolatent', 'hunyuanvideolatent', 'emptylatentvideo', 'videolatent', 'emptylatentimage'];
 
 const START_IMAGE_NODES = ['loadimage', 'loadimageoutput', 'etn_loadimage'];
+// 文本编码节点：除了通用 CLIPTextEncode，Qwen-Image-Edit / Z-Image 等编辑模型
+// 用 TextEncodeQwenImageEditPlus 这类“提示词 + 参考图”节点，同样属于文本编码环节。
+const TEXT_ENCODE_NODES = ['cliptextencode', 'textencodeqwenimageeditplus', 'textencodeqwenimageedit', 'textencodezimageomni', 'textencodebooguedit'];
 const VIDEO_OUTPUT_NODES = ['savevideo', 'savewebm', 'saveanimatedwebp', 'vhs_videocombine'];
 const VIDEO_PIPELINE_NODES = ['wan22imagetovideolatent', 'wanimagetovideolatent', 'hunyuanvideolatent', 'emptylatentvideo', 'videolinearcfg', 'videolatent'];
 
@@ -216,6 +219,7 @@ export function inferWorkflowMode(workflow) {
   const hasVideoOutput = list => [...classTypes].some(item => list.includes(item));
   const hasVideoPipeline = [...classTypes].some(item => VIDEO_PIPELINE_NODES.includes(item) || item.includes('imagetovideo'));
   const hasStartImage = has(START_IMAGE_NODES);
+  const hasTextEncode = has(TEXT_ENCODE_NODES);
 
   // 只要有视频产出节点或视频链路节点，就认定为 i2v：即使缺少 LoadImage
   // 也仍然会把 t2i 的 manifest 判为不匹配，而不是放过。
@@ -223,10 +227,10 @@ export function inferWorkflowMode(workflow) {
     return { mode: 'i2v', confidence: 'high', classTypes: [...classTypes] };
   }
   // 有图片输入 + 文本编码 + 采样器 => 图生图；纯文生图不会有 LoadImage。
-  if (hasStartImage && classTypes.has('cliptextencode') && classTypes.has('ksampler')) {
+  if (hasStartImage && hasTextEncode && classTypes.has('ksampler')) {
     return { mode: 'i2i', confidence: 'high', classTypes: [...classTypes] };
   }
-  if (classTypes.has('cliptextencode') && classTypes.has('ksampler')) {
+  if (hasTextEncode && classTypes.has('ksampler')) {
     return { mode: 't2i', confidence: 'high', classTypes: [...classTypes] };
   }
   return { mode: 'unknown', confidence: 'low', classTypes: [...classTypes] };
