@@ -1,0 +1,9 @@
+# 用途：向文案模型传入题材、背景、幂等键和待改写的小说正文。
+# 调用位置：server/providers/openai-compatible.mjs 的 rewrite()。
+# 可用占位符：{genre}、{background}、{idempotencyKey}、{sourceText}。
+题材：{genre}
+背景设定：{background}
+任务幂等键：{idempotencyKey}
+
+小说正文：
+{sourceText}

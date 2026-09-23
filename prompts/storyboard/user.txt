@@ -1,0 +1,9 @@
+# 用途：向分镜模型传入导演分析、镜头选择、视觉设定和全片配置。
+# 调用位置：server/providers/openai-compatible.mjs 的 generateStoryboard()。
+# 可用占位符：{directorAnalysis}、{shotSelection}、{visualBible}、{background}、{configuration}、{idempotencyKey}。
+导演分析：{directorAnalysis}
+镜头选择：{shotSelection}
+视觉设定：{visualBible}
+背景设定：{background}
+全片配置：{configuration}
+任务：{idempotencyKey}

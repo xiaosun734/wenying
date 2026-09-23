@@ -10,8 +10,9 @@
 | 人物视图 / 场景母版（文生图） | `z-image-turbo-t2i-api.json` | `manifests/z-image-turbo-t2i.json` | Z-Image Turbo |
 | 关键帧（单图图生图） | `krea2-keyframe-img2img-api.json` | `manifests/krea2-keyframe-img2img.json` | Krea2-Turbo Realistic v3 |
 | 关键帧（多图参考编辑） | `qwen-image-edit-keyframe-api.json` | `manifests/qwen-image-edit-keyframe.json` | Qwen-Image-Edit-2511（GGUF Q4_K_M） |
+| 镜头空背景板（场景参考重拍） | `qwen-image-scene-plate-api.json` | `manifests/qwen-image-scene-plate.json` | Qwen-Image-Edit-2511（GGUF Q4_K_M） |
 
-对应 `.env` 变量：`COMFYUI_WORKFLOW_PATH` / `COMFYUI_IMAGE_WORKFLOW_PATH` / `COMFYUI_KEYFRAME_WORKFLOW_PATH`，以及同名的 `*_MANIFEST_PATH`。
+对应 `.env` 变量：`COMFYUI_WORKFLOW_PATH` / `COMFYUI_IMAGE_WORKFLOW_PATH` / `COMFYUI_KEYFRAME_WORKFLOW_PATH` / `COMFYUI_SCENE_PLATE_WORKFLOW_PATH`，以及同名的 `*_MANIFEST_PATH`。
 
 ## 未启用的文件
 
@@ -20,15 +21,26 @@
 - `krea2-turbo-t2i-api.json` + `manifests/krea2-turbo-t2i.json`：Krea2 的文生图版本，与 Z-Image 结构一致，可以整体替换图像工作流。
 - `sunn 9.9文生图.json`：早期导入的第三方文生图工作流，没有对应 manifest。
 
+## 两阶段关键帧：先背景板，再角色
+
+生产流程不再把场景母版直接当最终关键帧画布：
+
+1. 策划阶段输出 `subjectAnchor`、`viewpointId`、`cameraPosition`、`cameraDirection` 和 `cameraHeight`。
+2. `qwen-image-scene-plate-api.json` 用空 latent 采样，把场景参考图只作为视觉条件，按策划机位生成无主要角色的背景板。
+3. 用户审核并选择背景板。
+4. 关键帧阶段把该背景板当画布，把角色三视图当身份参考，只负责把角色加入已经确定的构图。
+
+`SCENE_PLATE_REQUIRED=auto` 时，只要配置了场景背景板工作流，未确认的镜头就必须先完成背景板。
+
 ## 关键帧：谁当画布，谁当参考
 
 `krea2-keyframe-img2img-api.json` 是单图 img2img：`LoadImage → VAEEncode → KSampler`，只能接收一张参考图。关键帧工作流切到它时，镜头同时锁定了角色和场景也只会用上一张，另一张只存在于提示词文字里。
 
 `qwen-image-edit-keyframe-api.json` 用的是 Qwen-Image-Edit 的多图编辑节点 `TextEncodeQwenImageEditPlus`。要理解它是**编辑模型**：`image1` 不是“一张参考图”，而是**被编辑的画布**——官方 2509/2511 模板会把 `image1` 缩放后 `VAEEncode` 成 KSampler 的 `latent_image`，输出构图基本跟着这张图走。所以本项目按下面的分工传图：
 
-- 画布（`startImage` / `referenceImagePath`）= **场景参考图**，优先选与镜头机位最接近的那张场景视图；
+- 画布（`startImage` / `referenceImagePath`）= **已确认的镜头背景板**；两阶段流程关闭时兼容回退到场景参考图；
 - 参考图 2 = **角色三视图**，只锁定身份、脸、发型、服装和身体比例；
-- 参考图 3 = 同一场景的**另一机位**，帮助模型理解空间结构。
+- 参考图 3 = 场景参考图或同一场景的**另一机位**，帮助模型理解空间结构。
 
 manifest 里的 `startImage` / `referenceImages` 就是这三张图的槽位：
 

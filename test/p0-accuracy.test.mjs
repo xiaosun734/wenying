@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { buildGenerationSpec, validateShotSelection } from '../server/storyboard-task.mjs';
+import { buildGenerationSpec, compileScenePlatePrompt, deriveCameraPlan, validateShotSelection } from '../server/storyboard-task.mjs';
+import { sceneViewPriority } from '../server/media-task.mjs';
 import {
   closeDatabase,
   createMediaAsset,
@@ -24,7 +25,7 @@ import { MediaTaskRunner, buildImageNegativePrompt, distributeShotDurations, isG
 import { FfmpegComposer } from '../server/providers/composer.mjs';
 import { JsonSubtitleProvider } from '../server/providers/subtitles.mjs';
 import { probeMedia } from '../server/media-probe.mjs';
-import { compileReferencePrompt, referenceVariants, sceneSafeDescription } from '../server/visual-assets.mjs';
+import { compileReferencePrompt, normalizeVisualBibleContent, referenceVariants, sceneSafeDescription } from '../server/visual-assets.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,7 +45,7 @@ test('builds an executable generation spec without leaking abstract narrative pu
     style: '日系二维动画电影风格',
   };
   const spec = buildGenerationSpec(shot, beat, bible, { visualStyle: 'anime' });
-  assert.equal(spec.version, 'generation-spec-v5');
+  assert.equal(spec.version, 'generation-spec-v6');
   assert.ok(spec.mustShow.includes('沈砚'));
   assert.ok(spec.mustNotShow.includes('列车实体'));
   assert.ok(spec.mustNotShow.includes('女人实体'));
@@ -83,10 +84,133 @@ test('builds a three-view character sheet in the project style without plot text
 
 test('scene reference variants are generic camera views of the same location', () => {
   const variants = referenceVariants('scene');
-  assert.deepEqual(variants.map(item => item.id), ['axis-master', 'eye-level', 'side-45', 'elevated']);
+  assert.deepEqual(variants.map(item => item.id), ['axis-master', 'eye-level', 'side-45', 'elevated', 'interior-medium']);
   assert.ok(variants.every(item => /同一场景/.test(item.instruction)));
   assert.ok(variants.every(item => !/站台|隧道|电子屏|广播/.test(item.instruction)));
   assert.match(variants.find(item => item.id === 'eye-level').instruction, /只改变摄影机位置/);
+  // 内部中景机位用来匹配分镜里的近景/中景，必须在无人物、只改机位的前提下保持空间一致。
+  assert.match(variants.find(item => item.id === 'interior-medium').instruction, /中景机位/);
+  assert.match(variants.find(item => item.id === 'interior-medium').instruction, /只改变摄影机位置和景别/);
+});
+
+test('reclassifies scenes and props that the model wrongly returned as characters', () => {
+  const content = normalizeVisualBibleContent({
+    characters: [
+      {
+        name: '张元', age: '18岁', face: '圆润少年脸', hair: '黑色短发', body: '清瘦',
+        costume: '白色校服衬衫',
+      },
+      {
+        name: '学校抽卡场地', description: '宽阔的室内大厅，抽卡台位于正前方',
+        layout: '入口在南侧，抽卡平台在北侧', lighting: '顶部冷白光与暖金灯带',
+        colorPalette: '浅灰、纯白、冷蓝', entityId: 'character_school',
+        selectedReferenceAssetId: 'wrong-scene-asset', locked: true,
+      },
+      {
+        name: '神之石', description: '掌心大小的多面体晶石，内部有彩色光纹',
+        entityId: 'character_stone', selectedReferenceAssetId: 'wrong-prop-asset', locked: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(content.characters.map(item => item.name), ['张元']);
+  assert.deepEqual(content.scenes.map(item => item.name), ['学校抽卡场地']);
+  assert.deepEqual(content.props.map(item => item.name), ['神之石']);
+  assert.equal(content.scenes[0].entityId, 'character_school');
+  assert.equal(content.props[0].entityId, 'character_stone');
+  assert.equal(content.scenes[0].reclassifiedFrom, 'character');
+  assert.equal(content.props[0].reclassifiedFrom, 'character');
+  assert.equal(content.scenes[0].selectedReferenceAssetId, null);
+  assert.equal(content.props[0].selectedReferenceAssetId, null);
+  assert.equal(content.scenes[0].locked, false);
+
+  content.scenes[0].selectedReferenceAssetId = 'new-scene-asset';
+  content.scenes[0].locked = true;
+  const roundTrip = normalizeVisualBibleContent(content);
+  assert.equal(roundTrip.scenes[0].selectedReferenceAssetId, 'new-scene-asset');
+  assert.equal(roundTrip.scenes[0].locked, true);
+
+  const scenePrompt = compileReferencePrompt({
+    entity: roundTrip.scenes[0], kind: 'scene', visualBible: roundTrip,
+    variant: referenceVariants('scene')[0],
+  });
+  const propPrompt = compileReferencePrompt({
+    entity: roundTrip.props[0], kind: 'prop', visualBible: roundTrip,
+    variant: referenceVariants('prop')[0],
+  });
+  assert.match(scenePrompt, /场景一致性母版/);
+  assert.doesNotMatch(scenePrompt, /角色全身三视图/);
+  assert.match(propPrompt, /道具一致性设定/);
+  assert.doesNotMatch(propPrompt, /角色全身三视图/);
+});
+
+test('keyframe canvas picks the scene view closest to the storyboard camera', () => {
+  assert.equal(sceneViewPriority({ shotSize: '中景', angle: '平视' })[0], 'interior-medium');
+  assert.equal(sceneViewPriority({ shotSize: '近景', angle: '平视' })[0], 'interior-medium');
+  assert.equal(sceneViewPriority({ shotSize: '远景', angle: '平视' })[0], 'eye-level');
+  assert.equal(sceneViewPriority({ shotSize: '全景', angle: '高机位俯拍' })[0], 'elevated');
+  assert.equal(sceneViewPriority({ shotSize: '远景', angle: '侧面四分之三' })[0], 'side-45');
+});
+
+test('derives a fixed camera plan and builds a character-free scene plate prompt', () => {
+  const shot = {
+    plot: '沈砚站在中央祭坛前查看彩色石头。',
+    shotSize: '中景',
+    angle: '平视',
+    composition: '主体在右三分线，祭坛位于背景中央',
+    focalLengthMm: 50,
+    subjectAnchor: '画面右三分线，祭坛前方',
+    viewpointId: 'interior-medium',
+    cameraPosition: '进入广场内部，位于沈砚左前方',
+    cameraDirection: '朝向沈砚和中央祭坛',
+  };
+  const plan = deriveCameraPlan(shot, {});
+  assert.equal(plan.viewpointId, 'interior-medium');
+  assert.match(plan.cameraPosition, /广场内部/);
+  assert.match(plan.subjectAnchor, /右三分线/);
+
+  const bible = {
+    style: '日式动画质感',
+    scenes: [{
+      name: '宗门广场',
+      description: '中央祭坛，石板地面，周围宗门建筑',
+      layout: '入口在南侧，祭坛在中轴中心',
+      lighting: '紫蓝色灵光',
+      colorPalette: '紫、蓝、银白',
+      selectedReferenceAssetId: 'scene-ref-1',
+    }],
+    characters: [{ name: '沈砚' }],
+  };
+  const prompt = compileScenePlatePrompt(shot, bible, { visualStyle: 'anime' });
+  assert.match(prompt, /空场景背景板/);
+  assert.match(prompt, /不生成任何主要角色/);
+  assert.match(prompt, /进入广场内部/);
+  assert.doesNotMatch(prompt, /沈砚/);
+});
+
+test('interior camera view uses a framing-first prompt instead of the full scene bible', () => {
+  const bible = {
+    style: '日式动画质感',
+    characters: [],
+    scenes: [{
+      name: '宗门广场',
+      description: '大型宗门中央觉醒广场，中央有圆形祭坛，' + '细节描述'.repeat(100),
+      lighting: '祭坛紫色灵力光柱是主光源，周围建筑点缀蓝紫色灵灯，' + '补充描述'.repeat(60),
+      colorPalette: '深紫为主色，高亮紫为能量色，银白为建筑色',
+    }],
+  };
+  const scene = bible.scenes[0];
+  const master = referenceVariants('scene').find(item => item.id === 'axis-master');
+  const interior = referenceVariants('scene').find(item => item.id === 'interior-medium');
+  const masterPrompt = compileReferencePrompt({ entity: scene, kind: 'scene', visualBible: bible, variant: master });
+  const interiorPrompt = compileReferencePrompt({ entity: scene, kind: 'scene', visualBible: bible, variant: interior });
+  // 构图指令必须排在最前：排在后面会被整段场景设定盖掉，模型会一直交广角俯视母版。
+  assert.match(interiorPrompt, /^构图与机位：同一场景的内部中景机位参考/);
+  assert.match(interiorPrompt, /光照：/);
+  assert.match(interiorPrompt, /色板：/);
+  assert.ok(interiorPrompt.length < masterPrompt.length, '机位图提示词必须比母版提示词短');
+  assert.ok(!interiorPrompt.includes('细节描述'.repeat(40)), '关键要素必须截断，不能把整段场景设定塞进来');
+  assert.ok(!interiorPrompt.includes('补充描述'.repeat(30)), '光照描述必须截断');
 });
 
 test('scene descriptions drop character actions and body sensations', () => {
@@ -186,8 +310,8 @@ test('recompiles generation specs that were built before or from another visual 
   assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v2', visualBibleHash: 'bible-hash' }, 'bible-hash'), true);
   assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v3', visualBibleHash: 'bible-hash' }, 'bible-hash'), true);
   assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5' }, 'bible-hash'), true);
-  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5', visualBibleHash: 'old-hash' }, 'bible-hash'), true);
-  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v5', visualBibleHash: 'bible-hash' }, 'bible-hash'), false);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v6', visualBibleHash: 'old-hash' }, 'bible-hash'), true);
+  assert.equal(isGenerationSpecOutdated({ version: 'generation-spec-v6', visualBibleHash: 'bible-hash' }, 'bible-hash'), false);
 });
 
 test('regenerates legacy empty subtitle assets so burn-in is not silently skipped', async () => {

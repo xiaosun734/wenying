@@ -1,4 +1,5 @@
 import { ComfyUiMediaProvider } from './comfyui.mjs';
+import { optionalPrompt } from '../prompt-config.mjs';
 
 export function createMediaProvider() {
   const provider = String(process.env.MEDIA_PROVIDER || 'comfyui').toLowerCase();
@@ -13,9 +14,11 @@ export function createMediaProvider() {
     imageWorkflowManifestPath: process.env.COMFYUI_IMAGE_WORKFLOW_MANIFEST_PATH,
     keyframeWorkflowPath: process.env.COMFYUI_KEYFRAME_WORKFLOW_PATH,
     keyframeWorkflowManifestPath: process.env.COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH,
+    scenePlateWorkflowPath: process.env.COMFYUI_SCENE_PLATE_WORKFLOW_PATH,
+    scenePlateWorkflowManifestPath: process.env.COMFYUI_SCENE_PLATE_WORKFLOW_MANIFEST_PATH,
     keyframeDenoise: Number(process.env.COMFYUI_KEYFRAME_DENOISE || 0.82),
     useReferenceForKeyframes: String(process.env.COMFYUI_KEYFRAME_USE_REFERENCE || 'true').toLowerCase() === 'true',
-    imageNegativePrompt: process.env.COMFYUI_IMAGE_NEGATIVE_PROMPT,
+    imageNegativePrompt: optionalPrompt('COMFYUI_IMAGE_NEGATIVE_PROMPT'),
     imageWidth: Number(process.env.COMFYUI_IMAGE_WIDTH || process.env.COMFYUI_WIDTH || 576),
     imageHeight: Number(process.env.COMFYUI_IMAGE_HEIGHT || process.env.COMFYUI_HEIGHT || 1024),
     mediaRoot: process.env.MEDIA_OUTPUT_DIR,
@@ -30,7 +33,7 @@ export function createMediaProvider() {
     frames: Number(process.env.COMFYUI_FRAMES || 121),
     fps: Number(process.env.COMFYUI_FPS || 24),
     fixedSeed: process.env.COMFYUI_FIXED_SEED,
-    negativePrompt: process.env.COMFYUI_NEGATIVE_PROMPT,
+    negativePrompt: optionalPrompt('COMFYUI_NEGATIVE_PROMPT'),
     ffprobePath: process.env.FFPROBE_PATH,
   });
 }

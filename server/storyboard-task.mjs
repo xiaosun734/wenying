@@ -20,6 +20,7 @@ import { RETRIEVAL_STRATEGY_VERSION } from './knowledge-retriever.mjs';
 import { characterSafeAppearance, cleanEntityText, normalizeVisualBibleContent, resolveVisualStyle, sceneSafeDescription, visualBibleContentHash, buildGenerationSignature } from './visual-assets.mjs';
 
 const terminalStates = new Set(['succeeded', 'failed', 'canceled']);
+const VIEWPOINT_IDS = new Set(['front-wide', 'front-eye', 'left-45', 'right-45', 'interior-medium', 'elevated']);
 
 /**
  * 快速验收模式：整条链路只跑少量镜头、每个镜头控制在几秒内，用于快速验证
@@ -212,7 +213,20 @@ export class StoryboardTaskRunner {
           const beat = directorAnalysis.segments
             .find(item => item.segmentId === storyboardSegment.segmentId)?.beats
             .find(item => item.beatId === shot.beatId);
-          const generationSpec = buildGenerationSpec(shot, beat, bible.content, plan.configuration);
+          const selectedShot = shotSelection.segments
+            .find(item => item.segmentId === storyboardSegment.segmentId)?.selections
+            .find(item => item.beatId === shot.beatId);
+          const plannedShot = {
+            ...(selectedShot || {}),
+            ...shot,
+            subjectAnchor: shot.subjectAnchor || selectedShot?.subjectAnchor || '',
+            viewpointId: shot.viewpointId || selectedShot?.viewpointId || '',
+            cameraPosition: shot.cameraPosition || selectedShot?.cameraPosition || '',
+            cameraDirection: shot.cameraDirection || selectedShot?.cameraDirection || '',
+            cameraHeight: shot.cameraHeight || selectedShot?.cameraHeight || '',
+            cameraReason: shot.cameraReason || selectedShot?.cameraReason || '',
+          };
+          const generationSpec = buildGenerationSpec(plannedShot, beat, bible.content, plan.configuration);
           const keyframeSignature = buildGenerationSignature({
             kind: 'keyframe', visualBibleHash: bibleHash, referenceAssetIds: generationSpec.referenceAssetIds,
             promptCompilerVersion: 'keyframe-prompt-v1', prompt: generationSpec.keyframePrompt,
@@ -230,7 +244,7 @@ export class StoryboardTaskRunner {
             evidenceIds: shot.evidenceIds, generationSpec,
             keyframePromptZh: generationSpec.keyframePrompt, keyframeStatus: 'missing',
             keyframeSignature, motionSignature,
-            promptZh: compileMotionPrompt(shot, bible.content, plan.configuration, generationSpec), status: 'planned',
+            promptZh: compileMotionPrompt(plannedShot, bible.content, plan.configuration, generationSpec), status: 'planned',
           });
           createdShots.push({ ...created, transitionToNext: shot.transitionToNext });
         }
@@ -349,6 +363,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   ]);
   const camera = [shot?.shotSize, shot?.angle, shot?.composition, shot?.focalLengthMm ? `${shot.focalLengthMm}mm 焦段` : '']
     .filter(Boolean).join('，');
+  const cameraPlan = deriveCameraPlan(shot, beat);
   const startState = text(beat?.startState, 200) || (visibleAction ? '动作开始前保持当前人物和场景状态' : '');
   const endState = text(beat?.endState, 200) || (visibleAction ? '动作完成后保持当前状态' : '');
   const exactTextInPost = postproductionElements.some(item => /精确.*文字|后期叠加/.test(item));
@@ -376,7 +391,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const keyframePrompt = hasCharacterReference || hasSceneReference
     ? buildReferenceKeyframePrompt({
         hasCharacterReference, characterNamesInShot, sceneNames, visibleAction, plot,
-        shot, camera, style,
+        shot, camera, cameraPlan, style,
       })
     : [
         '【最终关键帧】',
@@ -387,7 +402,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
           : '',
         `【动作】\n动作起始状态：${startState || '保持自然静止'}\n画面动作：${visibleAction || plot || '主体处于当前剧情状态'}`,
         `【角色与环境关系】\n${characterNamesInShot}位于${sceneNames}中；${shot?.composition ? `空间位置与构图：${shot.composition}` : '人物站立面、尺度、遮挡关系与场景透视一致'}；人物必须接触场景地面或合理承载物，不得像贴纸悬浮在背景前方`,
-        `【镜头】\n景别：${shot?.shotSize || '中景'}\n机位：${shot?.angle || '平视'}\n镜头运动：${shot?.movement || '固定镜头'}\n焦距 / 视觉效果：${shot?.focalLengthMm ? `${shot.focalLengthMm}mm` : '自然透视'}\n构图：${shot?.composition || camera || '主体与场景关系清楚'}`,
+        `【镜头】\n景别：${shot?.shotSize || '中景'}\n机位：${cameraPlan.cameraPosition}\n朝向：${cameraPlan.cameraDirection}\n主体锚点：${cameraPlan.subjectAnchor}\n镜头运动：${shot?.movement || '固定镜头'}\n焦距 / 视觉效果：${shot?.focalLengthMm ? `${shot.focalLengthMm}mm` : '自然透视'}\n构图：${shot?.composition || camera || '主体与场景关系清楚'}`,
         `【光照】\n${lightingPrompt || '人物和场景使用统一、可信的主光、环境光与阴影关系'}`,
         `【画面风格】\n${style}`,
         `【一致性要求】\n保持角色身份一致；保持服装、发型、脸部特征、身体比例一致；保持场景建筑、地形和主要物体的位置关系一致；角色必须正确融入场景透视、光照和色彩环境；避免比例错误、透视错误、光照不一致、重复人物、上下分屏、多格漫画、拼贴、可读字幕或可读数字${mustNotShow.length ? `；不得出现：${mustNotShow.join('、')}` : ''}`,
@@ -406,7 +421,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
   const sanitizedKeyframePrompt = exactTextInPost ? replaceExactScreenText(keyframePrompt) : keyframePrompt;
   const sanitizedMotionPrompt = exactTextInPost ? replaceExactScreenText(motionPrompt) : motionPrompt;
   return {
-    version: 'generation-spec-v5',
+    version: 'generation-spec-v6',
     visualBibleHash: visualBibleContentHash(bible),
     plot,
     visibleSubject: characters.map(character => character.name).join('、'),
@@ -419,6 +434,7 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
     audioOnlyEvents,
     postproductionElements,
     protectedPositiveConcepts,
+    cameraPlan,
     continuityConstraints: constraints,
     characterReferences: characters,
     sceneReferences: scenes,
@@ -440,13 +456,15 @@ export function buildGenerationSpec(shot, beat, visualBible = {}, configuration 
  */
 function buildReferenceKeyframePrompt({
   hasCharacterReference, characterNamesInShot, sceneNames, visibleAction, plot,
-  shot, camera, style,
+  shot, camera, cameraPlan, style,
 }) {
   const subject = hasCharacterReference ? characterNamesInShot : '画面主体';
   const actionMoment = stripLeadingSubject(firstClause(visibleAction || plot || '主体处于当前剧情状态'), subject);
   const cameraLine = [
     shot?.shotSize || '中景',
-    shot?.angle || '平视',
+    cameraPlan.cameraPosition,
+    cameraPlan.cameraDirection,
+    `主体锚点：${cameraPlan.subjectAnchor}`,
     shot?.focalLengthMm ? `${shot.focalLengthMm}mm` : '',
     shot?.composition || camera || '',
   ].filter(Boolean).join('，');
@@ -461,6 +479,124 @@ function buildReferenceKeyframePrompt({
     `画面风格：${style}`,
     '生成单张电影感关键帧，不要拼贴、分屏或多格。',
   ].filter(Boolean).join('\n');
+}
+
+export function deriveCameraPlan(shot = {}, beat = {}) {
+  const viewpointId = normalizeViewpointId(shot.viewpointId || shot.cameraPlan?.viewpointId, shot);
+  const preset = CAMERA_VIEWPOINT_PRESETS[viewpointId] || CAMERA_VIEWPOINT_PRESETS['front-eye'];
+  const subjectAnchor = text(
+    shot.subjectAnchor
+      || shot.cameraPlan?.subjectAnchor
+      || inferSubjectAnchor(shot, beat),
+    80,
+  );
+  return {
+    viewpointId,
+    subjectAnchor,
+    cameraPosition: text(shot.cameraPosition || shot.cameraPlan?.cameraPosition || preset.position, 120),
+    cameraDirection: text(shot.cameraDirection || shot.cameraPlan?.cameraDirection || preset.direction, 120),
+    cameraHeight: text(shot.cameraHeight || shot.cameraPlan?.cameraHeight || preset.height, 80),
+    cameraReason: text(shot.cameraReason || shot.cameraPlan?.cameraReason || shot.selectionReason || '', 240),
+  };
+}
+
+/**
+ * 先生成不带主要角色的镜头背景板。空 latent 工作流只把场景参考图当视觉条件，
+ * 构图由 viewpoint / cameraPosition / cameraDirection 决定，避免直接继承场景母版机位。
+ */
+export function compileScenePlatePrompt(shot, visualBible = {}, configuration = {}, providedSpec = null) {
+  const spec = providedSpec || buildGenerationSpec(shot, null, visualBible, configuration);
+  const scene = spec.sceneReferences?.[0] || {};
+  const cameraPlan = spec.cameraPlan || deriveCameraPlan(shot);
+  const style = resolveVisualStyle(visualBible, configuration);
+  const characterNames = (visualBible.characters || []).map(item => String(item?.name || '').trim()).filter(Boolean);
+  const cameraPosition = scrubCharacterNames(cameraPlan.cameraPosition, characterNames);
+  const cameraDirection = scrubCharacterNames(cameraPlan.cameraDirection, characterNames);
+  const subjectAnchor = scrubCharacterNames(cameraPlan.subjectAnchor, characterNames);
+  const spatialAnchors = Array.isArray(scene.spatialAnchors) ? scene.spatialAnchors.join('、') : '';
+  return [
+    `重新拍摄同一处地点的空场景背景板，不生成任何主要角色：${scene.name || '当前场景'}`,
+    `机位：${cameraPosition}`,
+    `朝向：${cameraDirection}`,
+    `高度：${cameraPlan.cameraHeight}`,
+    `景别：${text(shot?.shotSize || '中景', 30)}；构图：${text(shot?.composition || '主体预留三分法位置', 80)}`,
+    spatialAnchors ? `可复用空间锚点：${spatialAnchors}` : '',
+    `在${subjectAnchor}留出主要角色的站位、遮挡和接触阴影空间`,
+    `保持同一地点的建筑结构、地形、主要物体位置、材质、光照方向和色板一致，不改变场景身份`,
+    `画面只保留场景、环境和合理远景人物剪影；不要出现主要角色面部、主角特写或角色设计图`,
+    `画面风格：${style}`,
+    '单张完整的空场景背景板，不要拼贴、分屏、多格、边框、文字或水印',
+  ].filter(Boolean).join('；');
+}
+
+function scrubCharacterNames(value, characterNames = []) {
+  let output = String(value || '');
+  for (const name of characterNames) output = output.split(name).join('主体预留位置');
+  return output;
+}
+
+const CAMERA_VIEWPOINT_PRESETS = {
+  'front-wide': {
+    position: '正面中轴外侧，远距离说明空间全貌',
+    direction: '朝向场景中心与主要出入口',
+    height: '略高于人物视线，允许轻微俯视',
+  },
+  'front-eye': {
+    position: '正面中轴外侧，平视机位',
+    direction: '朝向场景中心和主体预留位置',
+    height: '人物视线高度',
+  },
+  'left-45': {
+    position: '场景左侧前方约45度',
+    direction: '朝向场景中心、主体预留位置和主要背景物',
+    height: '平视或轻微低机位',
+  },
+  'right-45': {
+    position: '场景右侧前方约45度',
+    direction: '朝向场景中心、主体预留位置和主要背景物',
+    height: '平视或轻微低机位',
+  },
+  'interior-medium': {
+    position: '进入场景内部，位于主体预留位置前方或侧前方',
+    direction: '朝向主体预留位置及核心空间',
+    height: '平视，镜头离主体更近',
+  },
+  elevated: {
+    position: '高机位斜俯视，位于场景外缘上方',
+    direction: '朝向场景中心、主体预留位置和主要空间轴线',
+    height: '高位俯拍',
+  },
+};
+
+function normalizeViewpointId(value, shot = {}) {
+  const raw = String(value || '').trim().toLowerCase();
+  const aliases = {
+    wide: 'front-wide', 'front wide': 'front-wide', '全景': 'front-wide', '远景': 'front-wide',
+    eye: 'front-eye', 'front-eye': 'front-eye', '平视': 'front-eye',
+    left: 'left-45', 'left-45': 'left-45', '左侧': 'left-45', '左侧45度': 'left-45',
+    right: 'right-45', 'right-45': 'right-45', '右侧': 'right-45', '右侧45度': 'right-45',
+    interior: 'interior-medium', 'interior-medium': 'interior-medium', '内部中景': 'interior-medium',
+    elevated: 'elevated', '高机位': 'elevated', '俯拍': 'elevated',
+  };
+  if (VIEWPOINT_IDS.has(raw)) return raw;
+  if (aliases[raw]) return aliases[raw];
+  if (/俯|高机位|鸟瞰/.test(String(shot.angle || ''))) return 'elevated';
+  if (/近景|特写|中景/.test(String(shot.shotSize || ''))) return 'interior-medium';
+  if (/左/.test(String(shot.composition || ''))) return 'left-45';
+  if (/右/.test(String(shot.composition || ''))) return 'right-45';
+  if (/远|全/.test(String(shot.shotSize || ''))) return 'front-wide';
+  return 'front-eye';
+}
+
+function inferSubjectAnchor(shot = {}, beat = {}) {
+  const composition = String(shot.composition || '');
+  if (/左/.test(composition)) return '画面左三分线附近';
+  if (/右/.test(composition)) return '画面右三分线附近';
+  if (/前景/.test(composition)) return '画面前景中央';
+  if (/后景|远景/.test(composition)) return '画面后景中央';
+  if (/中心|中央|中间/.test(composition)) return '画面中央';
+  if (/中景|近景/.test(String(shot.shotSize || ''))) return '画面中央偏前景';
+  return String(beat.action || '').includes('人群') ? '人群前方中央' : '画面中央';
 }
 
 /** 只取动作的第一个分句：关键帧是静止的一瞬间，不写“先……随后……”的时间推进。 */
@@ -514,6 +650,12 @@ export function validateShotSelection(value, directorAnalysis, retrievalContexts
       angle: text(selection.angle || '平视', 40), movement: text(selection.movement || '固定镜头', 60),
       focalLengthMm: clamp(Math.round(Number(selection.focalLengthMm || 50)), 12, 200),
       composition: text(selection.composition || '三分法', 60), durationMs: clamp(Math.round(Number(selection.durationMs || 5000)), 1800, 6000),
+      subjectAnchor: text(selection.subjectAnchor || selection.cameraPlan?.subjectAnchor || '', 80),
+      viewpointId: normalizeViewpointId(selection.viewpointId || selection.cameraPlan?.viewpointId, selection),
+      cameraPosition: text(selection.cameraPosition || selection.cameraPlan?.cameraPosition || '', 120),
+      cameraDirection: text(selection.cameraDirection || selection.cameraPlan?.cameraDirection || '', 120),
+      cameraHeight: text(selection.cameraHeight || selection.cameraPlan?.cameraHeight || '', 80),
+      cameraReason: text(selection.cameraReason || selection.cameraPlan?.cameraReason || '', 240),
       selectionReason: text(selection.selectionReason, 300),
       evidenceIds: Array.isArray(selection.evidenceIds) ? selection.evidenceIds.map(String).slice(0, 6) : [],
       transitionToNext: normalizeTransition(selection.transitionToNext),
@@ -556,6 +698,12 @@ function validateStoryboard(value, segments) {
       angle: text(shot.angle || '平视', 40), focalLengthMm: clamp(Math.round(Number(shot.focalLengthMm || 50)), 12, 200),
       composition: text(shot.composition || '三分法', 60), purpose: text(shot.purpose, 200),
       durationMs: clamp(Math.round(Number(shot.durationMs || 5000)), 1800, 6000),
+      subjectAnchor: text(shot.subjectAnchor || shot.cameraPlan?.subjectAnchor || '', 80),
+      viewpointId: normalizeViewpointId(shot.viewpointId || shot.cameraPlan?.viewpointId, shot),
+      cameraPosition: text(shot.cameraPosition || shot.cameraPlan?.cameraPosition || '', 120),
+      cameraDirection: text(shot.cameraDirection || shot.cameraPlan?.cameraDirection || '', 120),
+      cameraHeight: text(shot.cameraHeight || shot.cameraPlan?.cameraHeight || '', 80),
+      cameraReason: text(shot.cameraReason || shot.cameraPlan?.cameraReason || '', 240),
       selectionReason: text(shot.selectionReason, 300), evidenceIds: Array.isArray(shot.evidenceIds) ? shot.evidenceIds.map(String).slice(0, 6) : [],
       transitionToNext: normalizeTransition(shot.transitionToNext),
     })) : [],

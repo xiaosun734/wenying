@@ -16,7 +16,11 @@ SQLite 数据默认写入 `data/wenying.sqlite`。数据目录和密钥文件不
 
 创建作品时可填写可选的“背景设定”（最多 2,000 字），用于补充世界观、人物关系和前情。它会随项目保存，并注入到文案改写、视觉设定、导演分析、镜头选择、分镜和单镜头提示词六个环节，作为全片一致性的锚点。背景设定与原文共享 24 小时留存策略（`SOURCE_RETENTION_HOURS`），原文清理时会一并清空。
 
-AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LLM_*_USER_PROMPT_TEMPLATE` 控制传给大语言模型的上下文模板，`VIDEO_*_PROMPT_TEMPLATE` 控制视频提示词模板，`COMFYUI_NEGATIVE_PROMPT` 控制 ComfyUI 负面提示词。模板支持 `{genre}`、`{sourceText}`、`{background}` 等占位符，换行使用 `\\n` 表示；修改后需要重启服务。六个 `LLM_*_USER_PROMPT_TEMPLATE` 默认都已带上 `背景设定：{background}`，可在不改变代码的前提下调整该行文案或移除它。
+AI 提示词按功能拆分在 `prompts/` 下，每个提示词变量对应一个独立文件，例如 `prompts/director/system.txt`、`prompts/director/user.txt`、`prompts/visual-bible/system.txt` 和 `prompts/video/negative.txt`。完整映射见 [prompts/README.md](./prompts/README.md)。模板支持 `{genre}`、`{sourceText}`、`{background}` 等占位符；修改后需要重启服务。`PROMPTS_DIR` 可以替换整个提示词目录，同名环境变量仍可临时覆盖单个提示词。
+
+角色、场景和道具的已选参考图，以及每个镜头已选中的关键帧，都支持输入调整提示词后生成新的图生图候选。该能力复用 `COMFYUI_KEYFRAME_WORKFLOW_PATH` / `COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH` 配置，原图和原候选会保留，新结果确认前不会替换当前锁定资产。
+
+关键帧生产默认使用两阶段流程：策划阶段输出主体锚点、机位编号、摄影机位置、朝向和高度；先生成不含主要角色的镜头背景板；审核确认背景板后，再以背景板为画布加入角色。背景板使用 `COMFYUI_SCENE_PLATE_WORKFLOW_PATH` / `COMFYUI_SCENE_PLATE_WORKFLOW_MANIFEST_PATH` 配置的独立空 latent 工作流，不再直接把场景母版图当最终关键帧画布。`SCENE_PLATE_REQUIRED=auto` 时，配置了场景背景板工作流就强制走该流程。
 
 ## 文案接口
 
@@ -47,6 +51,8 @@ AI 提示词集中在 `.env`：`LLM_*_SYSTEM_PROMPT` 控制系统提示词，`LL
 - `GET /generation-tasks/:id` 查询生成进度和片段素材
 - `POST /generation-tasks/:id/retry` 重试生成任务
 - `POST /generation-tasks/:id/cancel` 取消生成任务
+- `POST /shots/:id/scene-plate-tasks` 按策划机位生成无角色的镜头背景板
+- `POST /media-assets/:id/edit-tasks` 按提示词调整已选参考图或关键帧并生成新候选
 - `POST /segments/:id/regenerate` 创建单段新版本并重新生成
 - `POST /projects/:id/export-tasks` 创建导出任务
 - `GET /export-tasks/:id` 查询导出进度

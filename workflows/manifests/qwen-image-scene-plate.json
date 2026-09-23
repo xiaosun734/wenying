@@ -1,0 +1,52 @@
+{
+  "profileId": "qwen-image-scene-plate-2511",
+  "workflowVersion": 1,
+  "mode": "i2i",
+  "positivePrompt": {
+    "node": "6",
+    "field": "prompt"
+  },
+  "negativePrompt": {
+    "node": "7",
+    "field": "prompt"
+  },
+  "startImage": {
+    "node": "10",
+    "field": "image"
+  },
+  "referenceImages": [
+    {
+      "node": "11",
+      "field": "image"
+    },
+    {
+      "node": "14",
+      "field": "image"
+    }
+  ],
+  "seedInputs": [
+    {
+      "node": "3",
+      "field": "seed",
+      "increment": 0
+    }
+  ],
+  "denoise": {
+    "node": "3",
+    "field": "denoise"
+  },
+  "width": {
+    "node": "15",
+    "field": "width"
+  },
+  "height": {
+    "node": "15",
+    "field": "height"
+  },
+  "filenamePrefix": {
+    "node": "9",
+    "field": "filename_prefix"
+  },
+  "outputNode": "9",
+  "requiresStartImage": true
+}

@@ -84,6 +84,15 @@ const state = {
   scriptTaskStep: 'queued',
   scriptError: null,
   visualBible: null,
+  referenceAssets: [],
+  referenceEditPrompts: new Map(),
+  keyframeEditPrompts: new Map(),
+  scenePlateEditPrompts: new Map(),
+  scenePlateRequired: false,
+  visualAssetTaskId: null,
+  visualAssetTaskStatus: 'idle',
+  visualAssetProgress: 0,
+  visualAssetError: null,
   storyboardPlan: null,
   storyboardTaskId: null,
   storyboardTaskStatus: 'idle',
@@ -202,6 +211,7 @@ function syncProjectState(payload) {
   }
   if (payload.visualBible) state.visualBible = payload.visualBible;
   if (Array.isArray(payload.referenceAssets)) state.referenceAssets = payload.referenceAssets;
+  if (typeof payload.scenePlateRequired === 'boolean') state.scenePlateRequired = payload.scenePlateRequired;
   if (payload.visualAssetTask) {
     state.visualAssetTaskId = payload.visualAssetTask.id;
     state.visualAssetTaskStatus = payload.visualAssetTask.status;
@@ -365,7 +375,7 @@ async function pollVisualAssetTask() {
   try {
     const payload = await apiRequest(`/generation-tasks/${state.visualAssetTaskId}`);
     syncProjectState(payload);
-    const task = payload.generationTask || payload.task;
+    const task = payload.task || payload.generationTask;
     if (!task) return;
     state.visualAssetTaskStatus = task.status;
     state.visualAssetProgress = task.progress || 0;
@@ -378,7 +388,12 @@ async function pollVisualAssetTask() {
       }
       state.view = 'shot-review';
       render();
-      showToast(task.status === 'succeeded' ? '候选图片已生成，可以进行审核。' : state.visualAssetError, task.status === 'succeeded' ? 'success' : 'error');
+      const successMessage = task.type === 'asset_edit'
+        ? '调整候选已生成，可以继续对比和选择。'
+        : task.type === 'scene_plate_candidates'
+          ? '镜头背景板已生成，请选择后再生成角色关键帧。'
+        : '候选图片已生成，可以进行审核。';
+      showToast(task.status === 'succeeded' ? successMessage : state.visualAssetError, task.status === 'succeeded' ? 'success' : 'error');
     } else if (state.view === 'shot-review') {
       render();
     }
@@ -448,7 +463,7 @@ async function restoreSession() {
       startPolling(payload.task.id);
     } else if (payload.visualAssetTask && ['pending', 'running'].includes(payload.visualAssetTask.status)) {
       state.view = 'shot-review';
-      state.planningTab = 'visual';
+      state.planningTab = ['keyframe', 'scene_plate'].includes(payload.visualAssetTask.configuration?.scope) ? 'keyframes' : 'visual';
       render();
       startVisualAssetPolling(payload.visualAssetTask.id);    } else if (payload.storyboardTask && ['pending', 'running'].includes(payload.storyboardTask.status)) {
       state.view = 'storyboard-processing';
@@ -705,6 +720,39 @@ function visualEntitySettingsPanel(entities, bibleId) {
   }).join('')}</div></div>`;
 }
 
+function assetEditPanel(scope, source, disabled = false) {
+  if (!source?.id) return '';
+  const promptMap = scope === 'scene-plate'
+    ? state.scenePlateEditPrompts
+    : scope === 'keyframe'
+      ? state.keyframeEditPrompts
+      : state.referenceEditPrompts;
+  const prompt = promptMap.get(source.id) || '';
+  const action = scope === 'scene-plate'
+    ? 'edit-scene-plate-asset'
+    : scope === 'keyframe'
+      ? 'edit-keyframe-asset'
+      : 'edit-reference-asset';
+  const field = scope === 'scene-plate'
+    ? 'scenePlateEditPrompt'
+    : scope === 'keyframe'
+      ? 'keyframeEditPrompt'
+      : 'referenceEditPrompt';
+  const placeholder = scope === 'scene-plate'
+    ? '例如：保留机位，把地面改成雨后积水，环境光改冷'
+    : scope === 'keyframe'
+      ? '例如：保留构图，把地面改成积水，增加冷色环境光'
+      : '例如：保留脸型和构图，把外套改成深灰色长风衣';
+  return `<div class="asset-edit-panel"><label for="asset-edit-${escapeHtml(source.id)}">调整选中图</label><textarea id="asset-edit-${escapeHtml(source.id)}" class="property-textarea asset-edit-prompt" data-edit-prompt-field="${field}" data-edit-source-id="${escapeHtml(source.id)}" maxlength="1200" placeholder="${placeholder}">${escapeHtml(prompt)}</textarea><div class="asset-edit-actions"><button class="btn btn-primary btn-xs" data-action="${action}" data-asset-id="${escapeHtml(source.id)}" ${disabled || !prompt.trim() ? 'disabled' : ''}>${icon('spark', 12)} 生成调整候选</button></div></div>`;
+}
+
+function scenePlatePanel(shot, disabled = false) {
+  const candidates = (shot.scenePlateCandidates || []).filter(asset => asset.status === 'ready');
+  const selected = candidates.find(asset => asset.id === shot.selectedScenePlateAssetId);
+  const status = selected ? '已确认' : candidates.length ? '待选择' : '未生成';
+  return `<section class="scene-plate-panel"><div class="scene-plate-head"><div><strong>镜头背景板</strong><span>${escapeHtml(shot.generationSpec?.cameraPlan?.cameraPosition || '机位待策划')}</span></div><span class="status-pill ${selected ? 'ready' : 'draft'}">${status}</span></div><div class="scene-plate-candidates">${candidates.length ? candidates.map(asset => `<button class="scene-plate-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-scene-plate" data-asset-id="${escapeHtml(asset.id)}"><img src="${escapeHtml(asset.url)}" alt=""><span>背景板 ${asset.metadata?.candidateIndex || ''}</span></button>`).join('') : '<div class="visual-reference-empty">尚无镜头背景板</div>'}</div><div class="action-group"><button class="btn btn-ghost btn-xs" data-action="generate-scene-plate" data-shot-id="${escapeHtml(shot.id)}" ${disabled ? 'disabled' : ''}>${icon('spark', 12)} 生成空场景背景板</button></div>${assetEditPanel('scene-plate', selected, disabled)}</section>`;
+}
+
 function shotReviewView() {
   const plan = state.storyboardPlan || {};
   const directorSegments = plan.directorAnalysis?.segments || [];
@@ -728,23 +776,28 @@ function shotReviewView() {
     content = entities.length ? `<div class="visual-entity-grid">${entities.map(entity => {
       const selected = state.referenceAssets.find(asset => asset.id === entity.selectedReferenceAssetId);
       const candidates = state.referenceAssets.filter(asset => asset.metadata?.entityId === entity.entityId && asset.metadata?.entityKind === entity.entityKind && asset.status === 'ready');
-      return `<article class="visual-entity-card"><div class="visual-entity-head"><div><span class="tag">${entity.group}</span><h4>${escapeHtml(entity.name || '未命名')}</h4><p>${escapeHtml(entity.appearance || entity.description || entity.costume || '')}</p></div><span class="status-pill ${selected ? 'ready' : 'draft'}">${selected ? '已锁定' : '待确认'}</span></div>${selected?.url ? `<img class="visual-reference-main" src="${escapeHtml(selected.url)}" alt="${escapeHtml(entity.name)}参考图">` : '<div class="visual-reference-empty">尚未选择主参考图</div>'}<div class="visual-candidate-strip">${candidates.map(asset => `<button class="visual-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-reference-asset" data-asset-id="${escapeHtml(asset.id)}" title="${escapeHtml(asset.metadata?.variantLabel || '')}"><img src="${escapeHtml(asset.url)}" alt=""><span>${escapeHtml(asset.metadata?.variantLabel || '候选')}</span></button>`).join('')}</div><button class="btn btn-ghost btn-sm" data-action="generate-reference-assets" data-entity-kind="${entity.entityKind}" data-entity-id="${escapeHtml(entity.entityId)}" ${state.visualAssetTaskStatus === 'running' || state.visualAssetTaskStatus === 'pending' ? 'disabled' : ''}>${icon('spark', 13)} 生成 4 张参考候选</button></article>`;
+      const processing = state.visualAssetTaskStatus === 'running' || state.visualAssetTaskStatus === 'pending';
+      return `<article class="visual-entity-card"><div class="visual-entity-head"><div><span class="tag">${entity.group}</span><h4>${escapeHtml(entity.name || '未命名')}</h4><p>${escapeHtml(entity.appearance || entity.description || entity.costume || '')}</p></div><span class="status-pill ${selected ? 'ready' : 'draft'}">${selected ? '已锁定' : '待确认'}</span></div>${selected?.url ? `<img class="visual-reference-main" src="${escapeHtml(selected.url)}" alt="${escapeHtml(entity.name)}参考图">` : '<div class="visual-reference-empty">尚未选择主参考图</div>'}<div class="visual-candidate-strip">${candidates.map(asset => `<button class="visual-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-reference-asset" data-asset-id="${escapeHtml(asset.id)}" title="${escapeHtml(asset.metadata?.variantLabel || '')}"><img src="${escapeHtml(asset.url)}" alt=""><span>${escapeHtml(asset.metadata?.variantLabel || '候选')}</span></button>`).join('')}</div>${assetEditPanel('reference', selected, processing)}<button class="btn btn-ghost btn-sm" data-action="generate-reference-assets" data-entity-kind="${entity.entityKind}" data-entity-id="${escapeHtml(entity.entityId)}" ${processing ? 'disabled' : ''}>${icon('spark', 13)} 生成 4 张参考候选</button></article>`;
     }).join('')}</div>${visualEntitySettingsPanel(entities, state.visualBible?.id)}` : '<div class="empty-state">当前 Visual Bible 没有可资产化的人物、场景或道具。</div>';
   } else {
     content = `<div class="keyframe-review-list">${shots.map(shot => {
       const candidates = (shot.keyframeCandidates || []).filter(asset => asset.status === 'ready');
       const selected = (shot.keyframeCandidates || []).find(asset => asset.id === shot.selectedKeyframeAssetId);
       const statusLabel = shot.keyframeStatus === 'confirmed' ? '已确认' : candidates.length ? '待选择' : '未生成';
-      return `<article class="keyframe-review-card"><div class="keyframe-copy"><div class="keyframe-title-row"><div><span class="tag">${escapeHtml(shot.segmentTitle)} · 镜头 ${shot.sequence}</span><h4>${escapeHtml(shot.plot || '')}</h4></div><span class="status-pill ${shot.keyframeStatus === 'confirmed' ? 'ready' : 'draft'}">${statusLabel}</span></div><div class="camera-specs"><span>${escapeHtml(shot.shotSize || '')}</span><span>${escapeHtml(shot.angle || '')}</span><span>${escapeHtml(shot.movement || '')}</span><span>${escapeHtml(shot.composition || '')}</span></div><dl class="keyframe-facts"><div><dt>可见动作</dt><dd>${escapeHtml(shot.generationSpec?.visibleAction || '')}</dd></div><div><dt>必须出现</dt><dd>${escapeHtml((shot.generationSpec?.mustShow || []).join('、') || '—')}</dd></div><div><dt>禁止出现</dt><dd>${escapeHtml((shot.generationSpec?.mustNotShow || []).join('、') || '—')}</dd></div></dl><textarea class="property-textarea keyframe-prompt-edit" data-keyframe-prompt-shot="${escapeHtml(shot.id)}">${escapeHtml(shot.keyframePromptZh || '')}</textarea><div class="action-group"><button class="btn btn-ghost btn-xs" data-action="save-keyframe-prompt" data-shot-id="${escapeHtml(shot.id)}">保存提示词</button><button class="btn btn-primary btn-xs" data-action="generate-keyframes" data-shot-id="${escapeHtml(shot.id)}" ${state.visualAssetTaskStatus === 'running' || state.visualAssetTaskStatus === 'pending' ? 'disabled' : ''}>${icon('spark', 12)} 生成 3 张候选</button></div></div><div class="keyframe-candidates">${candidates.length ? candidates.map(asset => `<button class="keyframe-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-keyframe" data-asset-id="${escapeHtml(asset.id)}"><img src="${escapeHtml(asset.url)}" alt=""><span>候选 ${asset.metadata?.candidateIndex || ''}</span></button>`).join('') : '<div class="visual-reference-empty">尚无关键帧候选</div>'}</div></article>`;
+      const processing = state.visualAssetTaskStatus === 'running' || state.visualAssetTaskStatus === 'pending';
+      return `<article class="keyframe-review-card"><div class="keyframe-copy"><div class="keyframe-title-row"><div><span class="tag">${escapeHtml(shot.segmentTitle)} · 镜头 ${shot.sequence}</span><h4>${escapeHtml(shot.plot || '')}</h4></div><span class="status-pill ${shot.keyframeStatus === 'confirmed' ? 'ready' : 'draft'}">${statusLabel}</span></div><div class="camera-specs"><span>${escapeHtml(shot.shotSize || '')}</span><span>${escapeHtml(shot.generationSpec?.cameraPlan?.cameraPosition || shot.angle || '')}</span><span>${escapeHtml(shot.generationSpec?.cameraPlan?.cameraDirection || '')}</span><span>${escapeHtml(shot.generationSpec?.cameraPlan?.subjectAnchor || '')}</span><span>${escapeHtml(shot.movement || '')}</span></div><dl class="keyframe-facts"><div><dt>可见动作</dt><dd>${escapeHtml(shot.generationSpec?.visibleAction || '')}</dd></div><div><dt>必须出现</dt><dd>${escapeHtml((shot.generationSpec?.mustShow || []).join('、') || '—')}</dd></div><div><dt>禁止出现</dt><dd>${escapeHtml((shot.generationSpec?.mustNotShow || []).join('、') || '—')}</dd></div></dl><textarea class="property-textarea keyframe-prompt-edit" data-keyframe-prompt-shot="${escapeHtml(shot.id)}">${escapeHtml(shot.keyframePromptZh || '')}</textarea><div class="action-group"><button class="btn btn-ghost btn-xs" data-action="save-keyframe-prompt" data-shot-id="${escapeHtml(shot.id)}">保存提示词</button><button class="btn btn-primary btn-xs" data-action="generate-keyframes" data-shot-id="${escapeHtml(shot.id)}" ${processing || (state.scenePlateRequired && !shot.selectedScenePlateAssetId) ? 'disabled' : ''}>${icon('spark', 12)} 生成 3 张候选</button></div>${assetEditPanel('keyframe', selected, processing)}</div><div class="keyframe-right">${scenePlatePanel(shot, processing)}<div class="keyframe-candidates">${candidates.length ? candidates.map(asset => `<button class="keyframe-candidate ${asset.id === selected?.id ? 'active' : ''}" data-action="select-keyframe" data-asset-id="${escapeHtml(asset.id)}"><img src="${escapeHtml(asset.url)}" alt=""><span>候选 ${asset.metadata?.candidateIndex || ''}</span></button>`).join('') : '<div class="visual-reference-empty">尚无关键帧候选</div>'}</div></div></article>`;
     }).join('')}</div>`;
   }
   const regenerateLayer = state.planningTab === 'director' ? 'director' : state.planningTab === 'camera' ? 'camera' : 'storyboard';
   const summary = state.keyframeSummary || { total: shots.length, confirmed: shots.filter(shot => shot.keyframeStatus === 'confirmed').length };
   const planConfirmed = plan.status === 'confirmed';
   const allKeyframesReady = summary.total > 0 && summary.confirmed === summary.total;
+  const missingScenePlates = state.scenePlateRequired
+    ? shots.filter(shot => shot.keyframeStatus !== 'confirmed' && !shot.selectedScenePlateAssetId).length
+    : 0;
   const processing = ['pending', 'running'].includes(state.visualAssetTaskStatus);
   const actionMarkup = planConfirmed
-    ? `<button class="btn btn-ghost btn-sm" data-action="confirm-shots" disabled>${icon('check', 13)} 分镜已确认</button><button class="btn btn-primary btn-sm" data-action="${allKeyframesReady ? 'start-keyframed-generation' : 'generate-all-keyframes'}" ${processing ? 'disabled' : ''}>${allKeyframesReady ? '开始图生视频' : `生成缺失关键帧（${summary.total - summary.confirmed}）`} ${icon('arrow', 13)}</button>`
+    ? `<button class="btn btn-ghost btn-sm" data-action="confirm-shots" disabled>${icon('check', 13)} 分镜已确认</button><button class="btn btn-primary btn-sm" data-action="${allKeyframesReady ? 'start-keyframed-generation' : missingScenePlates ? 'generate-all-scene-plates' : 'generate-all-keyframes'}" ${processing ? 'disabled' : ''}>${allKeyframesReady ? '开始图生视频' : missingScenePlates ? `生成缺失背景板（${missingScenePlates}）` : `生成缺失关键帧（${summary.total - summary.confirmed}）`} ${icon('arrow', 13)}</button>`
     : `<button class="btn btn-ghost btn-sm" data-action="regenerate-storyboard" data-layer="${regenerateLayer}" ${state.submitPending ? 'disabled' : ''}>${icon('refresh', 13)} 从当前层重新生成</button><button class="btn btn-primary btn-sm" data-action="confirm-shots" ${state.submitPending ? 'disabled' : ''}>确认分镜并进入视觉资产 ${icon('arrow', 13)}</button>`;
   return `<section class="page workflow-page">${backRow()}<div style="margin-bottom:27px"><div class="eyebrow">PRE-PRODUCTION REVIEW</div><h1 class="workflow-title">审核前期策划与关键帧</h1><p class="workflow-subtitle">${escapeHtml(state.title)} · ${shots.length} 个镜头 · 关键帧 ${summary.confirmed}/${summary.total} · ${plan.knowledgeSnapshot?.knowledgeBases?.length || 0} 个知识库</p></div>${workflowSteps(4)}${processing ? `<div class="processing-bar visual-task-bar"><i style="width:${state.visualAssetProgress}%"></i><span>${escapeHtml(state.visualAssetError || '正在生成候选图片…')}</span></div>` : ''}<div class="planning-tabs">${tabs.map(([id, label]) => `<button class="${state.planningTab === id ? 'active' : ''}" data-action="select-planning-tab" data-tab="${id}">${label}</button>`).join('')}</div><div class="panel pad planning-panel">${content}</div><div class="bottom-action-bar"><p>${icon('lock', 13)} ${planConfirmed ? '分镜已锁定。确认每镜关键帧后，I2V 只负责动作与运镜。' : '确认后锁定分镜，随后完成参考资产和逐镜关键帧审核。'}</p><div class="action-group">${actionMarkup}</div></div></section>`;
 }
@@ -1095,7 +1148,8 @@ async function generateReferenceAssets(entityKind, entityId) {
     const payload = await apiRequest(`/projects/${state.activeProjectId}/reference-assets`, {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
-      body: JSON.stringify({ entityKind, entityId, count: 4 }),
+      // 场景多出"内部中景机位"，用来匹配分镜里的近景/中景镜头。
+      body: JSON.stringify({ entityKind, entityId, count: entityKind === 'scene' ? 5 : 4 }),
     });
     syncProjectState(payload);
     startVisualAssetPolling(payload.task.id);
@@ -1108,8 +1162,26 @@ async function generateReferenceAssets(entityKind, entityId) {
   }
 }
 
+function shotsWithoutScenePlates() {
+  return state.segments
+    .flatMap(segment => segment.shots || [])
+    .filter(shot => shot.keyframeStatus !== 'confirmed' && !shot.selectedScenePlateAssetId)
+    .map(shot => shot.id);
+}
+
 async function generateKeyframes(shotIds = []) {
   if (!state.activeProjectId || !shotIds.length) return;
+  if (state.scenePlateRequired) {
+    const missingPlates = shotIds.filter(shotId => {
+      const shot = state.segments.flatMap(segment => segment.shots || []).find(item => item.id === shotId);
+      return !shot?.selectedScenePlateAssetId;
+    });
+    if (missingPlates.length) {
+      render();
+      showToast('请先生成并确认镜头背景板。', 'error');
+      return;
+    }
+  }
   state.visualAssetError = null;
   state.visualAssetTaskStatus = 'pending';
   render();
@@ -1134,6 +1206,32 @@ async function generateKeyframes(shotIds = []) {
   }
 }
 
+async function generateScenePlates(shotIds = []) {
+  if (!state.activeProjectId || !shotIds.length) return;
+  state.visualAssetError = null;
+  state.visualAssetTaskStatus = 'pending';
+  render();
+  try {
+    let payload = null;
+    for (const shotId of shotIds) {
+      const idempotencyKey = `scene-plate-${shotId}-${Date.now()}`;
+      payload = await apiRequest(`/shots/${shotId}/scene-plate-tasks`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({ count: 2, frameType: 'start' }),
+      });
+    }
+    syncProjectState(payload);
+    startVisualAssetPolling(payload.task.id);
+    render();
+  } catch (error) {
+    state.visualAssetTaskStatus = 'failed';
+    state.visualAssetError = error.message;
+    render();
+    showToast(error.message, 'error');
+  }
+}
+
 async function selectVisualAsset(assetId) {
   if (!assetId) return;
   try {
@@ -1143,7 +1241,14 @@ async function selectVisualAsset(assetId) {
       syncProjectState(refreshed);
     }
     render();
-    showToast(payload.visualBible ? '主参考图已锁定，相关关键帧已标记失效。' : '关键帧已确认，视频候选已标记失效。');
+    const selectedType = payload.selectedAsset?.type;
+    showToast(
+      payload.visualBible
+        ? '主参考图已锁定，相关关键帧已标记失效。'
+        : selectedType === 'shot_scene_plate_candidate'
+          ? '镜头背景板已确认，请重新生成角色关键帧。'
+          : '关键帧已确认，视频候选已标记失效。',
+    );
   } catch (error) {
     showToast(error.message, 'error');
   }
@@ -1184,6 +1289,39 @@ async function saveKeyframePrompt(shotId) {
     render();
     showToast('关键帧提示词已保存，请重新生成候选。');
   } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+async function startAssetEdit(assetId, scope = 'reference') {
+  if (!state.activeProjectId || !assetId) return;
+  const promptMap = scope === 'scene_plate'
+    ? state.scenePlateEditPrompts
+    : scope === 'keyframe'
+      ? state.keyframeEditPrompts
+      : state.referenceEditPrompts;
+  const prompt = String(promptMap.get(assetId) || '').trim();
+  if (!prompt) {
+    showToast('请输入需要调整的内容。', 'error');
+    return;
+  }
+  state.visualAssetError = null;
+  state.visualAssetTaskStatus = 'pending';
+  render();
+  try {
+    const idempotencyKey = `asset-edit-${assetId}-${Date.now()}`;
+    const payload = await apiRequest(`/media-assets/${encodeURIComponent(assetId)}/edit-tasks`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ prompt, count: 2 }),
+    });
+    syncProjectState(payload);
+    startVisualAssetPolling(payload.task.id);
+    render();
+  } catch (error) {
+    state.visualAssetTaskStatus = 'failed';
+    state.visualAssetError = error.message;
+    render();
     showToast(error.message, 'error');
   }
 }
@@ -1533,14 +1671,32 @@ function handleAction(element) {
     case 'select-reference-asset':
       void selectVisualAsset(element.dataset.assetId);
       break;
+    case 'edit-reference-asset':
+      void startAssetEdit(element.dataset.assetId, 'reference');
+      break;
     case 'generate-keyframes':
       void generateKeyframes([element.dataset.shotId]);
+      break;
+    case 'generate-scene-plate':
+      void generateScenePlates([element.dataset.shotId]);
+      break;
+    case 'generate-all-scene-plates':
+      void generateScenePlates(shotsWithoutScenePlates());
       break;
     case 'generate-all-keyframes':
       void generateKeyframes(state.segments.flatMap(segment => (segment.shots || []).filter(shot => shot.keyframeStatus !== 'confirmed').map(shot => shot.id)));
       break;
     case 'select-keyframe':
       void selectVisualAsset(element.dataset.assetId);
+      break;
+    case 'select-scene-plate':
+      void selectVisualAsset(element.dataset.assetId);
+      break;
+    case 'edit-keyframe-asset':
+      void startAssetEdit(element.dataset.assetId, 'keyframe');
+      break;
+    case 'edit-scene-plate-asset':
+      void startAssetEdit(element.dataset.assetId, 'scene_plate');
       break;
     case 'save-keyframe-prompt':
       void saveKeyframePrompt(element.dataset.shotId);
@@ -1671,6 +1827,18 @@ document.addEventListener('click', event => {
 });
 
 app.addEventListener('input', event => {
+  if (event.target.dataset.editPromptField) {
+    const sourceId = event.target.dataset.editSourceId;
+    const promptMap = event.target.dataset.editPromptField === 'scenePlateEditPrompt'
+      ? state.scenePlateEditPrompts
+      : event.target.dataset.editPromptField === 'keyframeEditPrompt'
+        ? state.keyframeEditPrompts
+        : state.referenceEditPrompts;
+    promptMap.set(sourceId, event.target.value);
+    const button = event.target.closest('.asset-edit-panel')?.querySelector('button[data-action]');
+    if (button) button.disabled = !event.target.value.trim();
+    return;
+  }
   if (event.target.dataset.shotField) {
     const shot = state.segments.flatMap(segment => segment.shots || []).find(item => item.id === event.target.dataset.shotId);
     if (shot) shot[event.target.dataset.shotField] = event.target.type === 'number' ? Number(event.target.value) : event.target.value;

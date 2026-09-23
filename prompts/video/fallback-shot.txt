@@ -1,0 +1,4 @@
+# 用途：单镜头规划失败时，使用片段标题生成兜底视频提示词。
+# 调用位置：server/media-task.mjs 的 runSegmentTask()。
+# 可用占位符：{title}。
+{title}，连续动作，电影级构图

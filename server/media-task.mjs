@@ -33,7 +33,7 @@ import {
   updateSegmentShot,
 } from './db.mjs';
 import { optionalPrompt, renderPrompt } from './prompt-config.mjs';
-import { acceptanceSettings, buildGenerationSpec, compileKeyframePrompt, compileMotionPrompt } from './storyboard-task.mjs';
+import { acceptanceSettings, buildGenerationSpec, compileKeyframePrompt, compileMotionPrompt, compileScenePlatePrompt } from './storyboard-task.mjs';
 import { REFERENCE_ASSET_TYPES, buildGenerationSignature, compileReferencePrompt, getVisualEntity, referenceVariants, visualBibleContentHash } from './visual-assets.mjs';
 import { compileNegativePrompt } from './providers/comfyui.mjs';
 
@@ -84,7 +84,9 @@ export class MediaTaskRunner {
       if (task.type === 'video') await this.runProjectTask(task);
       else if (task.type === 'segment') await this.runSegmentTask(task);
       else if (task.type === 'reference_candidates') await this.runReferenceCandidatesTask(task);
+      else if (task.type === 'scene_plate_candidates') await this.runScenePlateCandidatesTask(task);
       else if (task.type === 'keyframe_candidates') await this.runKeyframeCandidatesTask(task);
+      else if (task.type === 'asset_edit') await this.runAssetEditTask(task);
       else if (task.type === 'compose') await this.runComposeTask(task);
     } catch (error) {
       const message = error?.message || '视频生成失败，请稍后重试';
@@ -92,7 +94,9 @@ export class MediaTaskRunner {
         status: 'failed', current_step: 'failed', error_code: error?.code || 'MEDIA_TASK_FAILED',
         error_message: message, completed_at: timestamp(), updated_at: timestamp(),
       });
-      if (!task.parent_task_id) updateProject(this.db, task.project_id, { status: 'video_failed', updated_at: timestamp() });
+      if (!task.parent_task_id && ['video', 'segment', 'compose'].includes(task.type)) {
+        updateProject(this.db, task.project_id, { status: 'video_failed', updated_at: timestamp() });
+      }
       this.logger.error?.(`[media-task] ${task.id} failed: ${error?.code || 'MEDIA_TASK_FAILED'}`);
     }
   }
@@ -210,7 +214,8 @@ export class MediaTaskRunner {
     if (!entity) throw Object.assign(new Error('视觉实体不存在'), { code: 'VISUAL_ENTITY_NOT_FOUND' });
     this.assertImageProvider();
     updateGenerationTask(this.db, task.id, { status: 'running', current_step: 'generating_reference_candidates', progress: 8, started_at: timestamp(), updated_at: timestamp() });
-    const count = clampCount(configuration.count, 1, 4);
+    // 场景要多一个"内部中景机位"，让关键帧能按分镜的景别挑到接近的机位图。
+    const count = clampCount(configuration.count, 1, kind === 'scene' ? 5 : 4);
     // 角色只定义了一个“全身三视图”变体，需要出 4 张候选时就重复取用（换 seed）；
     // 场景有多个机位变体，则依次取用。
     const variantPool = referenceVariants(kind);
@@ -264,6 +269,139 @@ export class MediaTaskRunner {
     updateGenerationTask(this.db, task.id, { status: 'succeeded', current_step: 'completed', progress: 100, configuration_json: JSON.stringify({ ...configuration, seedList }), completed_at: timestamp(), updated_at: timestamp() });
   }
 
+  async runScenePlateCandidatesTask(task) {
+    const project = getProject(this.db, task.project_id);
+    const configuration = task.configuration || {};
+    const shot = configuration.shotId ? getSegmentShot(this.db, configuration.shotId) : null;
+    if (!project || !shot) throw Object.assign(new Error('镜头不存在'), { code: 'SHOT_NOT_FOUND' });
+    const plan = shot.storyboard_plan_id ? getStoryboardPlan(this.db, shot.storyboard_plan_id) : null;
+    const bible = getLatestVisualBible(this.db, project.id, plan?.script_version_id || project.active_script_version_id);
+    if (!bible) throw Object.assign(new Error('视觉设定不存在'), { code: 'VISUAL_BIBLE_NOT_FOUND' });
+    this.assertImageProvider();
+    updateGenerationTask(this.db, task.id, {
+      status: 'running', current_step: 'generating_scene_plates', progress: 8,
+      started_at: timestamp(), updated_at: timestamp(),
+    });
+
+    const count = clampCount(configuration.count, 1, 3);
+    const frameType = configuration.frameType === 'end' ? 'end' : 'start';
+    const beat = plan?.director_analysis?.segments?.flatMap(item => item.beats || []).find(item => item.beatId === shot.beat_id);
+    const editableShot = shotToEditable(shot);
+    const storedSpec = shot.generation_spec?.version ? shot.generation_spec : null;
+    const specOutdated = isGenerationSpecOutdated(storedSpec, visualBibleContentHash(bible.content));
+    const spec = specOutdated
+      ? buildGenerationSpec(editableShot, beat, bible.content, plan?.configuration || {})
+      : storedSpec;
+    if (specOutdated) {
+      updateSegmentShot(this.db, shot.id, {
+        generation_spec_json: JSON.stringify(spec),
+        keyframe_prompt_zh: compileKeyframePrompt(editableShot, bible.content, plan?.configuration || {}, spec),
+        updated_at: timestamp(),
+      });
+    }
+    const prompt = configuration.promptOverride
+      ? String(configuration.promptOverride)
+      : compileScenePlatePrompt(editableShot, bible.content, plan?.configuration || {}, spec);
+    const referenceAssetIds = uniqueValues([...(spec.referenceAssetIds || []), ...selectedBibleReferenceIds(bible.content)]);
+    const { primaryReference, alternateReferences } = selectScenePlateReferences(this.db, project.id, referenceAssetIds, editableShot);
+    const referenceImagePath = referenceImagePathOf(this.provider, primaryReference);
+    if (!referenceImagePath) {
+      throw Object.assign(
+        new Error('空场景背景板生成需要已确认的场景参考图。请先在“视觉资产”中锁定场景主参考图。'),
+        { code: 'SCENE_REFERENCE_MISSING' },
+      );
+    }
+    const referenceImagePaths = alternateReferences
+      .map(asset => referenceImagePathOf(this.provider, asset))
+      .filter(Boolean);
+    const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
+    const negativePrompt = [
+      buildImageNegativePrompt(this.provider, {
+        mustNotShow: spec.mustNotShow || [],
+        protectedConcepts: spec.protectedPositiveConcepts || [],
+      }),
+      '主要角色特写，主角正脸，角色设定图，人物三视图',
+    ].filter(Boolean).join('，');
+    const seedList = [];
+
+    for (let index = 0; index < count; index += 1) {
+      const seed = candidateSeed(configuration, index);
+      const signature = buildGenerationSignature({
+        kind: 'scene-plate', shotId: shot.id, frameType,
+        visualBibleHash: visualBibleContentHash(bible.content),
+        referenceAssetHashes: referenceHashes, cameraPlan: spec.cameraPlan || null,
+        promptCompilerVersion: 'scene-plate-prompt-v1', prompt,
+        workflowHash: this.provider.workflowHash || null,
+        seedList: seed === undefined ? [] : [seed],
+      });
+      const image = await this.provider.generateImage({
+        project,
+        prompt,
+        negativePrompt,
+        negativeOverride: true,
+        seed,
+        denoise: 1,
+        mode: 'scenePlate',
+        filenamePrefix: `sceneplate_${safePart(shot.id)}_${index + 1}`,
+        width: configuration.width,
+        height: configuration.height,
+        referenceImagePath,
+        referenceImagePaths,
+        metadata: {
+          shotId: shot.id,
+          frameType,
+          cameraPlan: spec.cameraPlan || null,
+          referenceAssetHashes: referenceHashes,
+          referenceImagePaths,
+          generationSignature: signature,
+        },
+      });
+      if (this.provider?.scenePlateWorkflowPath && !image.metadata?.startImage) {
+        throw Object.assign(
+          new Error('空场景背景板没有实际使用场景参考图，请检查 COMFYUI_SCENE_PLATE_* 配置。'),
+          { code: 'SCENE_PLATE_REFERENCE_NOT_USED' },
+        );
+      }
+      seedList.push(image.metadata?.seed ?? seed ?? null);
+      createMediaAsset(this.db, {
+        id: randomUUID(),
+        projectId: project.id,
+        segmentVersionId: shot.segment_version_id,
+        shotId: shot.id,
+        type: 'shot_scene_plate_candidate',
+        provider: this.provider.provider,
+        model: this.provider.model,
+        objectKey: image.objectKey,
+        sizeBytes: image.sizeBytes,
+        generationSignature: signature,
+        metadata: {
+          ...(image.metadata || {}),
+          shotId: shot.id,
+          frameType,
+          candidateIndex: index + 1,
+          visualBibleId: bible.id,
+          visualBibleHash: visualBibleContentHash(bible.content),
+          referenceAssetIds,
+          referenceAssetHashes: referenceHashes,
+          cameraPlan: spec.cameraPlan || null,
+          generationTaskId: task.id,
+          generationSignature: signature,
+          selected: false,
+        },
+      });
+      updateGenerationTask(this.db, task.id, {
+        progress: Math.round(((index + 1) / count) * 92),
+        updated_at: timestamp(),
+      });
+    }
+
+    updateGenerationTask(this.db, task.id, {
+      status: 'succeeded', current_step: 'completed', progress: 100,
+      configuration_json: JSON.stringify({ ...configuration, seedList }),
+      completed_at: timestamp(), updated_at: timestamp(),
+    });
+  }
+
   async runKeyframeCandidatesTask(task) {
     const project = getProject(this.db, task.project_id);
     const configuration = task.configuration || {};
@@ -284,7 +422,7 @@ export class MediaTaskRunner {
     const spec = specOutdated
       ? buildGenerationSpec(editableShot, beat, bible.content, plan?.configuration || {})
       : storedSpec;
-    const prompt = configuration.promptOverride
+    const basePrompt = configuration.promptOverride
       ? String(configuration.promptOverride)
       : frameType === 'end'
         ? `${compileKeyframePrompt(editableShot, bible.content, plan?.configuration || {}, spec)}；画面表现该镜头动作结束后的稳定状态：${spec.endState || '保持主体与场景连续'}`
@@ -294,13 +432,31 @@ export class MediaTaskRunner {
       // row in sync so the审核页面 shows the same prompt that was submitted.
       updateSegmentShot(this.db, shot.id, {
         generation_spec_json: JSON.stringify(spec),
-        keyframe_prompt_zh: prompt,
+        keyframe_prompt_zh: basePrompt,
         updated_at: timestamp(),
       });
     }
     const referenceAssetIds = uniqueValues([...(spec.referenceAssetIds || []), ...selectedBibleReferenceIds(bible.content)]);
     const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
-    const { canvasReference, companionReferences } = selectKeyframeReferenceAssets(this.db, project.id, referenceAssetIds, editableShot);
+    const selectedReferences = selectKeyframeReferenceAssets(this.db, project.id, referenceAssetIds, editableShot);
+    const selectedScenePlate = shot.selected_scene_plate_asset_id ? getMediaAsset(this.db, shot.selected_scene_plate_asset_id) : null;
+    const scenePlateRequired = configuration.requireScenePlate === true;
+    if (scenePlateRequired && (!selectedScenePlate || selectedScenePlate.status !== 'ready')) {
+      throw Object.assign(
+        new Error('当前镜头缺少已确认的空场景背景板。请先生成并选择背景板，再生成角色关键帧。'),
+        { code: 'SCENE_PLATE_REQUIRED' },
+      );
+    }
+    const canvasReference = selectedScenePlate || selectedReferences.canvasReference;
+    const companionReferences = selectedScenePlate
+      ? [selectedReferences.canvasReference, ...selectedReferences.companionReferences]
+        .filter(Boolean)
+        .filter(asset => asset.id !== selectedScenePlate.id && asset.object_key !== selectedScenePlate.object_key)
+        .slice(0, 2)
+      : selectedReferences.companionReferences;
+    const prompt = selectedScenePlate
+      ? `以已选空场景背景板作为唯一构图和机位基准，只加入角色，不改变背景、空间结构、透视、光照或镜头机位。\n\n${basePrompt}`
+      : basePrompt;
     // 关键帧走的是 Qwen-Image-Edit 的“编辑画布”路线：主参考图会被 ImageScale →
     // VAEEncode 接进 KSampler.latent_image，是模型真正要编辑的那张图，所以它必须是
     // 场景图（角色要被放进的地方）。角色三视图只能当参考图 2，负责身份与外观。
@@ -321,7 +477,8 @@ export class MediaTaskRunner {
       const signature = buildGenerationSignature({
         kind: 'keyframe', frameType, shotId: shot.id, scriptVersionHash: plan?.script_version_id || null,
         generationSpecHash: buildGenerationSignature({ spec }), visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes,
-        promptCompilerVersion: 'keyframe-prompt-v3', prompt: submittedPrompt, workflowHash: this.provider.workflowHash || null,
+        scenePlateAssetId: selectedScenePlate?.id || null,
+        promptCompilerVersion: 'keyframe-prompt-v4', prompt: submittedPrompt, workflowHash: this.provider.workflowHash || null,
         width: configuration.width || null, height: configuration.height || null, seedList: seed === undefined ? [] : [seed],
       });
       const image = await this.provider.generateImage({
@@ -338,7 +495,7 @@ export class MediaTaskRunner {
         height: configuration.height,
         referenceImagePath,
         referenceImagePaths,
-        metadata: { shotId: shot.id, frameType, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, referenceImagePaths, generationSignature: signature },
+        metadata: { shotId: shot.id, frameType, visualBibleId: bible.id, visualBibleHash: bibleHash, referenceAssetHashes: referenceHashes, referenceImagePaths, scenePlateAssetId: selectedScenePlate?.id || null, generationSignature: signature },
       });
       if (referenceRequired && !image.metadata?.startImage) {
         throw Object.assign(
@@ -357,10 +514,157 @@ export class MediaTaskRunner {
       updateGenerationTask(this.db, task.id, { progress: Math.round(((index + 1) / count) * 92), updated_at: timestamp() });
     }
     updateSegmentShot(this.db, shot.id, {
-      keyframe_status: 'candidates_ready', keyframe_signature: buildGenerationSignature({ kind: 'keyframe-prompt-v3', prompt: submittedPrompt, referenceHashes, bibleHash }),
+      keyframe_status: 'candidates_ready', keyframe_signature: buildGenerationSignature({ kind: 'keyframe-prompt-v4', prompt: submittedPrompt, referenceHashes, bibleHash, scenePlateAssetId: selectedScenePlate?.id || null }),
       updated_at: timestamp(),
     });
     updateGenerationTask(this.db, task.id, { status: 'succeeded', current_step: 'completed', progress: 100, configuration_json: JSON.stringify({ ...configuration, seedList }), completed_at: timestamp(), updated_at: timestamp() });
+  }
+
+  async runAssetEditTask(task) {
+    const project = getProject(this.db, task.project_id);
+    if (!project) throw Object.assign(new Error('作品不存在'), { code: 'PROJECT_NOT_FOUND' });
+    const configuration = task.configuration || {};
+    const source = configuration.sourceAssetId ? getMediaAsset(this.db, configuration.sourceAssetId) : null;
+    if (!source || source.project_id !== project.id) throw Object.assign(new Error('源图片不存在'), { code: 'SOURCE_ASSET_NOT_FOUND' });
+    if (source.status !== 'ready') throw Object.assign(new Error('只能调整当前可用的图片'), { code: 'SOURCE_ASSET_NOT_READY' });
+    const target = assetEditTarget(source);
+    if (!target) throw Object.assign(new Error('该图片类型不支持提示词调整'), { code: 'ASSET_NOT_EDITABLE' });
+    const editPrompt = String(configuration.prompt || '').trim();
+    if (!editPrompt) throw Object.assign(new Error('请输入需要调整的内容'), { code: 'EDIT_PROMPT_REQUIRED' });
+    this.assertImageProvider();
+
+    const sourceImagePath = referenceImagePathOf(this.provider, source);
+    if (!sourceImagePath) throw Object.assign(new Error('源图片文件不可用'), { code: 'SOURCE_ASSET_FILE_MISSING' });
+    const count = clampCount(configuration.count, 1, 3);
+    const requestedDenoise = configuration.denoise === undefined || configuration.denoise === null || configuration.denoise === ''
+      ? NaN
+      : Number(configuration.denoise);
+    const denoise = Number.isFinite(requestedDenoise)
+      ? Math.max(0, Math.min(1, requestedDenoise))
+      : Math.max(0, Math.min(1, Number(this.provider?.keyframeDenoise ?? 0.82)));
+    const width = Math.max(64, Number(source.metadata?.width || this.provider?.imageWidth) || 576);
+    const height = Math.max(64, Number(source.metadata?.height || this.provider?.imageHeight) || 1024);
+
+    updateGenerationTask(this.db, task.id, {
+      status: 'running', current_step: 'generating_asset_edits', progress: 8,
+      started_at: timestamp(), updated_at: timestamp(),
+    });
+
+    let shot = null;
+    let generationSpec = {};
+    let companionReferences = [];
+    let referenceAssetIds = [];
+    if (target.scope === 'keyframe' || target.scope === 'scene_plate') {
+      shot = source.shot_id ? getSegmentShot(this.db, source.shot_id) : null;
+      if (!shot) throw Object.assign(new Error('图片对应镜头不存在'), { code: 'SHOT_NOT_FOUND' });
+      const plan = shot.storyboard_plan_id ? getStoryboardPlan(this.db, shot.storyboard_plan_id) : null;
+      const bible = getLatestVisualBible(this.db, project.id, plan?.script_version_id || project.active_script_version_id);
+      referenceAssetIds = uniqueValues([
+        ...(source.metadata?.referenceAssetIds || []),
+        ...selectedBibleReferenceIds(bible?.content || {}),
+      ]);
+      const selectedReferences = selectKeyframeReferenceAssets(
+        this.db,
+        project.id,
+        referenceAssetIds,
+        shotToEditable(shot),
+      );
+      companionReferences = [selectedReferences.canvasReference, ...selectedReferences.companionReferences]
+        .filter(Boolean)
+        .filter(asset => asset.id !== source.id && asset.object_key !== source.object_key)
+        .filter(asset => target.scope === 'scene_plate' ? asset.type === 'scene_reference' : true)
+        .slice(0, 2);
+      generationSpec = shot.generation_spec || {};
+    }
+
+    const prompt = compileAssetEditPrompt(source, editPrompt, target);
+    const referenceImagePaths = uniqueValues(
+      companionReferences.map(asset => referenceImagePathOf(this.provider, asset)).filter(Boolean),
+    );
+    const negativePrompt = buildImageNegativePrompt(this.provider, {
+      allowMultiView: source.metadata?.entityKind === 'character',
+      mustNotShow: generationSpec.mustNotShow || [],
+      protectedConcepts: generationSpec.protectedPositiveConcepts || [],
+    });
+    const sourceHash = source.metadata?.sha256 || source.generation_signature || source.object_key;
+    const referenceHashes = selectedReferenceHashes(this.db, project.id, referenceAssetIds);
+    const nextCandidateIndex = nextAssetEditCandidateIndex(this.db, source, target);
+    const seedList = [];
+
+    for (let index = 0; index < count; index += 1) {
+      const seed = candidateSeed(configuration, index);
+      const signature = buildGenerationSignature({
+        kind: 'asset-edit', sourceAssetId: source.id, sourceHash, prompt,
+        targetType: target.outputType, referenceAssetHashes: referenceHashes,
+        workflowHash: this.provider.workflowHash || null,
+        seedList: seed === undefined ? [] : [seed],
+      });
+      const image = await this.provider.generateImage({
+        project,
+        prompt,
+        negativePrompt,
+        negativeOverride: true,
+        seed,
+        denoise,
+        filenamePrefix: `edit_${safePart(target.scope)}_${safePart(source.id)}_${index + 1}`,
+        width,
+        height,
+        referenceImagePath: sourceImagePath,
+        referenceImagePaths,
+        metadata: {
+          editedFromAssetId: source.id,
+          editPrompt,
+          scope: target.scope,
+          generationSignature: signature,
+        },
+      });
+      if (this.provider?.keyframeWorkflowPath && !image.metadata?.startImage) {
+        throw Object.assign(
+          new Error('图片调整没有实际使用选中图，工作流已退化为文生图。请检查 COMFYUI_KEYFRAME_* 图生图配置。'),
+          { code: 'ASSET_EDIT_REFERENCE_NOT_USED' },
+        );
+      }
+      seedList.push(image.metadata?.seed ?? seed ?? null);
+      createMediaAsset(this.db, {
+        id: randomUUID(),
+        projectId: project.id,
+        segmentVersionId: source.segment_version_id || shot?.segment_version_id || null,
+        shotId: shot?.id || null,
+        type: target.outputType,
+        provider: this.provider.provider,
+        model: this.provider.model,
+        objectKey: image.objectKey,
+        sizeBytes: image.sizeBytes,
+        generationSignature: signature,
+        sourceAssetId: source.id,
+        metadata: {
+          ...(source.metadata || {}),
+          ...(image.metadata || {}),
+          shotId: shot?.id || source.metadata?.shotId || null,
+          frameType: target.frameType || source.metadata?.frameType || null,
+          editedFromAssetId: source.id,
+          editPrompt,
+          editScope: target.scope,
+          candidateIndex: nextCandidateIndex + index,
+          variantLabel: target.scope === 'reference'
+            ? `${source.metadata?.variantLabel || '候选'} · 调整`
+            : source.metadata?.variantLabel || null,
+          generationTaskId: task.id,
+          generationSignature: signature,
+          selected: false,
+        },
+      });
+      updateGenerationTask(this.db, task.id, {
+        progress: Math.round(((index + 1) / count) * 92),
+        updated_at: timestamp(),
+      });
+    }
+
+    updateGenerationTask(this.db, task.id, {
+      status: 'succeeded', current_step: 'completed', progress: 100,
+      configuration_json: JSON.stringify({ ...configuration, seedList }),
+      completed_at: timestamp(), updated_at: timestamp(),
+    });
   }
 
   assertImageProvider() {
@@ -379,6 +683,13 @@ export class MediaTaskRunner {
     if (['false', 'off', '0', 'no'].includes(raw)) return false;
     if (['true', 'on', '1', 'yes'].includes(raw)) return true;
     return Boolean(this.provider?.keyframeWorkflowPath && this.provider?.mediaRoot);
+  }
+
+  scenePlateRequired() {
+    const raw = String(process.env.SCENE_PLATE_REQUIRED ?? 'auto').trim().toLowerCase();
+    if (['false', 'off', '0', 'no'].includes(raw)) return false;
+    if (['true', 'on', '1', 'yes'].includes(raw)) return true;
+    return Boolean(this.provider?.scenePlateWorkflowPath && this.provider?.mediaRoot);
   }
 
   /**
@@ -682,7 +993,7 @@ export function buildImageNegativePrompt(provider, { allowMultiView = false, mus
  * so the first run after a visual-settings change always recompiles.
  */
 export function isGenerationSpecOutdated(spec, bibleHash) {
-  if (!spec || spec.version !== 'generation-spec-v5') return true;
+  if (!spec || spec.version !== 'generation-spec-v6') return true;
   if (!spec.visualBibleHash) return true;
   return spec.visualBibleHash !== bibleHash;
 }
@@ -738,6 +1049,63 @@ function normalizeEntityKind(value) {
   return ['character', 'scene', 'prop'].includes(value) ? value : 'character';
 }
 
+function assetEditTarget(asset) {
+  if (['character_reference', 'scene_reference', 'prop_reference'].includes(asset.type)) {
+    return { scope: 'reference', outputType: asset.type };
+  }
+  if (asset.type === 'shot_scene_plate_candidate') {
+    return { scope: 'scene_plate', outputType: 'shot_scene_plate_candidate' };
+  }
+  if (['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate'].includes(asset.type)) {
+    const frameType = asset.metadata?.frameType === 'end' || asset.type === 'shot_endframe_candidate' ? 'end' : 'start';
+    return {
+      scope: 'keyframe',
+      outputType: frameType === 'end' ? 'shot_endframe_candidate' : 'shot_keyframe_candidate',
+      frameType,
+    };
+  }
+  return null;
+}
+
+export function compileAssetEditPrompt(source, instruction, target = assetEditTarget(source)) {
+  const requested = String(instruction || '').trim();
+  const preservation = target?.scope === 'scene_plate'
+    ? '保持当前空场景背景板的机位、构图、建筑结构、空间位置、材质、光照方向和色板；只修改调整要求涉及的环境内容'
+    : target?.scope === 'keyframe'
+    ? '保持当前画面构图、镜头角度、人物身份、服装、道具位置、空间结构、透视、光照方向和色板；只修改调整要求涉及的内容'
+    : '保持未要求修改的主体身份、面部、发型、体型、服装结构、场景布局、机位、光照和色板；只修改调整要求涉及的内容';
+  const subject = target?.scope === 'scene_plate'
+    ? '当前空场景背景板'
+    : target?.scope === 'keyframe'
+    ? '当前关键帧'
+    : source?.metadata?.entityKind === 'scene'
+      ? '当前场景参考图'
+      : source?.metadata?.entityKind === 'character'
+        ? '当前角色参考图'
+        : '当前参考图';
+  return [
+    `基于选中的${subject}进行定向编辑`,
+    `调整要求：${requested}`,
+    preservation,
+    '输出单张完整画面，不拼接对比图，不添加边框、文字、水印或说明',
+  ].join('；');
+}
+
+function nextAssetEditCandidateIndex(db, source, target) {
+  const siblings = target.scope === 'reference'
+    ? listMediaAssets(db, { projectId: source.project_id }).filter(asset => (
+      asset.type === target.outputType
+      && asset.metadata?.entityKind === source.metadata?.entityKind
+      && asset.metadata?.entityId === source.metadata?.entityId
+    ))
+    : listMediaAssets(db, { shotId: source.shot_id }).filter(asset => asset.type === target.outputType);
+  const indexes = siblings
+    .map(asset => Number(asset.metadata?.candidateIndex))
+    .filter(Number.isFinite)
+    .map(value => Math.trunc(value));
+  return (indexes.length ? Math.max(...indexes) : 0) + 1;
+}
+
 function shotToEditable(shot) {
   return {
     plot: shot.plot_text,
@@ -747,6 +1115,12 @@ function shotToEditable(shot) {
     focalLengthMm: shot.focal_length_mm,
     composition: shot.composition,
     purpose: shot.narrative_purpose,
+    subjectAnchor: shot.generation_spec?.cameraPlan?.subjectAnchor || '',
+    viewpointId: shot.generation_spec?.cameraPlan?.viewpointId || '',
+    cameraPosition: shot.generation_spec?.cameraPlan?.cameraPosition || '',
+    cameraDirection: shot.generation_spec?.cameraPlan?.cameraDirection || '',
+    cameraHeight: shot.generation_spec?.cameraPlan?.cameraHeight || '',
+    cameraReason: shot.generation_spec?.cameraPlan?.cameraReason || '',
   };
 }
 
@@ -802,6 +1176,20 @@ function selectKeyframeReferenceAssets(db, projectId, assetIds, shot = {}) {
   return { canvasReference, companionReferences: companionReferences.slice(0, 2) };
 }
 
+function selectScenePlateReferences(db, projectId, assetIds, shot = {}) {
+  const ids = new Set((assetIds || []).filter(Boolean));
+  if (!ids.size) return { primaryReference: null, alternateReferences: [] };
+  const readyAssets = listMediaAssets(db, { projectId }).filter(asset => asset.status === 'ready');
+  const selectedScene = readyAssets.find(asset => ids.has(asset.id) && asset.type === 'scene_reference') || null;
+  if (!selectedScene) return { primaryReference: null, alternateReferences: [] };
+  const views = selectSceneReferenceViews(readyAssets, selectedScene, shot, null, { preferSelected: true });
+  const primaryReference = views.find(asset => asset.id === selectedScene.id) || selectedScene;
+  const alternateReferences = views
+    .filter(asset => asset.id !== primaryReference.id)
+    .slice(0, 2);
+  return { primaryReference, alternateReferences };
+}
+
 function selectSceneReferenceViews(assets, selectedScene, shot, primaryId, { preferSelected = true } = {}) {
   if (!selectedScene) return [];
   const entityId = selectedScene.metadata?.entityId;
@@ -831,11 +1219,19 @@ function selectSceneReferenceViews(assets, selectedScene, shot, primaryId, { pre
   }).slice(0, 2);
 }
 
-function sceneViewPriority(shot = {}) {
-  const camera = `${shot.angle || ''} ${shot.composition || ''}`;
-  if (/俯|高机位|鸟瞰/.test(camera)) return ['elevated', 'axis-master', 'eye-level', 'side-45'];
-  if (/侧|四分之三|45/.test(camera)) return ['side-45', 'eye-level', 'axis-master', 'elevated'];
-  return ['eye-level', 'axis-master', 'side-45', 'elevated'];
+/**
+ * 关键帧的画布是场景参考图，而 Qwen-Image-Edit 会继承画布的构图，所以"镜头符合分镜"
+ * 实际取决于"挑到哪张场景机位图"。这里按分镜的景别 + 机位给机位图排序：近景/中景优先
+ * 内部中景机位，俯拍优先高机位，侧向优先四分之三机位。
+ */
+export function sceneViewPriority(shot = {}) {
+  const size = String(shot.shotSize || '');
+  const angle = `${shot.angle || ''} ${shot.composition || ''}`;
+  const closeUp = /近景|特写|中近景|中景/.test(size);
+  if (/俯|高机位|鸟瞰/.test(angle)) return ['elevated', 'axis-master', 'eye-level', 'side-45', 'interior-medium'];
+  if (closeUp) return ['interior-medium', 'eye-level', 'side-45', 'axis-master', 'elevated'];
+  if (/侧|四分之三|45/.test(angle)) return ['side-45', 'eye-level', 'interior-medium', 'axis-master', 'elevated'];
+  return ['eye-level', 'axis-master', 'side-45', 'interior-medium', 'elevated'];
 }
 
 /**
@@ -850,7 +1246,13 @@ function buildReferenceRelationshipPrompt(canvasReference, companions = []) {
     const number = index + 1;
     const kind = asset.metadata?.entityKind;
     const variant = asset.metadata?.variantLabel || asset.metadata?.variantId || '';
-    if (index === 0 && kind === 'scene') {
+    if (index === 0 && asset.type === 'shot_scene_plate_candidate') {
+      lines.push(
+        'Reference Image 1: Planned scene background plate — this is the exact frame being edited.',
+        'Keep its camera position, framing, composition, architecture, terrain, spatial layout, main-object positions, scale, materials, lighting direction, shadows and color palette.',
+        'Only add the requested characters and their visible action. Do not replace the background or change the planned camera.',
+      );
+    } else if (index === 0 && kind === 'scene') {
       lines.push(
         `Reference Image 1: Environment canvas — this is the base image being edited${variant ? ` (${variant})` : ''}.`,
         'Keep its location, architecture, terrain, spatial layout, main-object positions, scale, materials, lighting atmosphere and color palette.',

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 对照实验：场景图当画布（官方 Qwen-Image-Edit 2511 接线），角色三视图当参考图 2。
- * 用法：node scripts/test-keyframe-canvas.mjs <seed> <steps> <flux|fixed> <short|app> [elevated|side-45]
+ * 用法：node scripts/probe-keyframe-canvas.mjs <seed> <steps> <flux|fixed> <short|app> [elevated|side-45]
  *   flux  = FluxKontextImageScale（官方 2511 模板的缩放）
  *   fixed = ImageScale 到 576x1024（本项目工作流的缩放）
  *   app   = 用数据库里最近一次真实任务提交的完整提示词/负向提示词

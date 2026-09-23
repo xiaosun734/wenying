@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { normalizeVisualBibleContent, visualBibleContentHash } from './visual-assets.mjs';
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 const now = () => new Date().toISOString();
 const metadataLogPaths = new WeakMap();
@@ -375,6 +375,7 @@ export async function openDatabase(filename, { metadataLogPath } = {}) {
   const visualShotMigrations = [
     ['keyframe_prompt_zh', "TEXT NOT NULL DEFAULT ''"], ['keyframe_prompt_en', "TEXT NOT NULL DEFAULT ''"],
     ['keyframe_status', "TEXT NOT NULL DEFAULT 'missing'"], ['selected_keyframe_asset_id', 'TEXT'],
+    ['selected_scene_plate_asset_id', 'TEXT'],
     ['selected_endframe_asset_id', 'TEXT'], ['generation_signature', 'TEXT'],
     ['keyframe_signature', 'TEXT'], ['motion_signature', 'TEXT'],
   ];
@@ -700,7 +701,7 @@ function normalizeShot(row) {
 }
 
 export function updateSegmentShot(db, id, fields) {
-  const allowed = ['prompt_zh', 'prompt_en', 'duration_ms', 'status', 'provider', 'model', 'provider_job_id', 'plot_text', 'shot_size', 'camera_movement', 'camera_angle', 'focal_length_mm', 'composition', 'narrative_purpose', 'selection_reason', 'evidence_ids_json', 'generation_spec_json', 'keyframe_prompt_zh', 'keyframe_prompt_en', 'keyframe_status', 'selected_keyframe_asset_id', 'selected_endframe_asset_id', 'generation_signature', 'keyframe_signature', 'motion_signature', 'updated_at'];
+  const allowed = ['prompt_zh', 'prompt_en', 'duration_ms', 'status', 'provider', 'model', 'provider_job_id', 'plot_text', 'shot_size', 'camera_movement', 'camera_angle', 'focal_length_mm', 'composition', 'narrative_purpose', 'selection_reason', 'evidence_ids_json', 'generation_spec_json', 'keyframe_prompt_zh', 'keyframe_prompt_en', 'keyframe_status', 'selected_scene_plate_asset_id', 'selected_keyframe_asset_id', 'selected_endframe_asset_id', 'generation_signature', 'keyframe_signature', 'motion_signature', 'updated_at'];
   const entries = Object.entries(fields).filter(([key, value]) => allowed.includes(key) && value !== undefined);
   if (!entries.length) return getSegmentShot(db, id);
   const assignments = entries.map(([key]) => `${key} = ?`).join(', ');
@@ -1025,13 +1026,14 @@ export function listMediaAssets(db, { projectId, segmentVersionId, shotId, type,
 export function invalidateProjectVisualDependents(db, projectId, { includeReferences = false } = {}) {
   const timestamp = now();
   const allowedTypes = includeReferences
-    ? ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video']
-    : ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video'];
+    ? ['shot_scene_plate_candidate', 'shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video']
+    : ['shot_scene_plate_candidate', 'shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate', 'shot_video', 'video'];
   const placeholders = allowedTypes.map(() => '?').join(',');
   const assets = db.prepare(`UPDATE media_assets SET status = 'stale' WHERE project_id = ? AND type IN (${placeholders}) AND status = 'ready'`).run(projectId, ...allowedTypes).changes;
   const shots = db.prepare(`
     UPDATE segment_shots
     SET keyframe_status = CASE WHEN selected_keyframe_asset_id IS NULL THEN 'missing' ELSE 'stale' END,
+        selected_scene_plate_asset_id = NULL,
         updated_at = ?
     WHERE segment_version_id IN (
       SELECT sv.id FROM segment_versions sv

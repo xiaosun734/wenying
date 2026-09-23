@@ -1,0 +1,4 @@
+# 用途：ComfyUI 没有可用镜头或片段提示词时，使用剧本正文生成最后兜底提示词。
+# 调用位置：server/providers/comfyui.mjs 的 preparePrompt()。
+# 可用占位符：{genre}、{scriptText}。
+{genre}小说场景，{scriptText}，人物动作与解说内容一致，电影级构图

@@ -97,7 +97,7 @@ export class OpenAICompatibleProvider {
       segments: JSON.stringify(segments),
       idempotencyKey,
     });
-    return this.requestStructured(requiredPrompt('LLM_VISUAL_BIBLE_SYSTEM_PROMPT'), userPrompt, 'visual-bible-v1');
+    return this.requestStructured(requiredPrompt('LLM_VISUAL_BIBLE_SYSTEM_PROMPT'), userPrompt, 'visual-bible-v2');
   }
 
   async generateDirectorAnalysis({ segments, background = '', genre, configuration, idempotencyKey }) {

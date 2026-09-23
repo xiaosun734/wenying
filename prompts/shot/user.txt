@@ -1,0 +1,10 @@
+# 用途：向单镜头生成流程传入题材、背景、镜头数量、视觉设定和口播内容。
+# 调用位置：server/providers/openai-compatible.mjs 的 generateShotPrompts()。
+# 可用占位符：{genre}、{background}、{count}、{visualBible}、{summary}、{scriptText}、{idempotencyKey}。
+题材：{genre}
+背景设定：{background}
+镜头数量：{count}
+视觉设定：{visualBible}
+片段摘要：{summary}
+口播：{scriptText}
+任务：{idempotencyKey}

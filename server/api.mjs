@@ -234,6 +234,7 @@ function segmentDto(db, segment, storyboardPlanId = null) {
     shots: shots.map(shot => {
       const keyframeCandidates = assets.filter(asset => asset.shot_id === shot.id && ['shot_keyframe_candidate', 'shot_keyframe_selected'].includes(asset.type));
       const endframeCandidates = assets.filter(asset => asset.shot_id === shot.id && asset.type === 'shot_endframe_candidate');
+      const scenePlateCandidates = assets.filter(asset => asset.shot_id === shot.id && asset.type === 'shot_scene_plate_candidate');
       return {
         id: shot.id, sequence: shot.sequence, beatId: shot.beat_id, plot: shot.plot_text,
         shotSize: shot.shot_size, movement: shot.camera_movement, angle: shot.camera_angle,
@@ -243,6 +244,7 @@ function segmentDto(db, segment, storyboardPlanId = null) {
         keyframePromptZh: shot.keyframe_prompt_zh || shot.generation_spec?.keyframePrompt || '',
         generationSpec: shot.generation_spec || {},
         selectedKeyframeAssetId: shot.selected_keyframe_asset_id || null,
+        selectedScenePlateAssetId: shot.selected_scene_plate_asset_id || null,
         selectedEndframeAssetId: shot.selected_endframe_asset_id || null,
         keyframeStatus: shot.keyframe_status || 'missing',
         generationSignature: shot.generation_signature || null,
@@ -251,6 +253,7 @@ function segmentDto(db, segment, storyboardPlanId = null) {
         durationMs: shot.duration_ms, duration: formatDuration(shot.duration_ms), status: shot.status,
         keyframeCandidates: keyframeCandidates.map(asset => mediaAssetDto(asset)),
         endframeCandidates: endframeCandidates.map(asset => mediaAssetDto(asset)),
+        scenePlateCandidates: scenePlateCandidates.map(asset => mediaAssetDto(asset)),
         media: assets.filter(asset => asset.shot_id === shot.id).map(asset => ({
           id: asset.id, type: asset.type, objectKey: asset.object_key,
           url: asset.object_key?.startsWith('projects/') ? `/media/${asset.object_key}` : null,
@@ -356,7 +359,7 @@ function projectState(db, id) {
   const storyboardTask = getLatestStoryboardTask(db, id);
   const projectAssets = listMediaAssets(db, { projectId: id });
   const referenceAssets = projectAssets.filter(isReferenceAsset).map(asset => mediaAssetDto(asset));
-  const visualAssetTask = getLatestGenerationTaskForTypes(db, id, ['reference_candidates', 'keyframe_candidates']);
+  const visualAssetTask = getLatestGenerationTaskForTypes(db, id, ['reference_candidates', 'scene_plate_candidates', 'keyframe_candidates', 'asset_edit']);
   const allShots = segments.flatMap(segment => segment.shots || []);
   const confirmedKeyframes = allShots.filter(shot => shot.selectedKeyframeAssetId && shot.keyframeStatus === 'confirmed').length;
   return {
@@ -364,6 +367,7 @@ function projectState(db, id) {
     generationChildren, version: versionDto(version), visualBible: getLatestVisualBible(db, id, version?.id), segments,
     storyboardPlan: storyboardPlanDto(db, storyboardPlan), storyboardTask: storyboardTaskDto(storyboardTask),
     referenceAssets, visualAssetTask: generationTaskDto(visualAssetTask),
+    scenePlateRequired: scenePlateRequirementEnabled(),
     keyframeSummary: { total: allShots.length, confirmed: confirmedKeyframes, missing: allShots.length - confirmedKeyframes },
   };
 }
@@ -392,6 +396,13 @@ function missingKeyframeShots(db, plan) {
 function keyframeRequirementEnabled(body = {}) {
   if (body.keyframeRequired !== undefined) return Boolean(body.keyframeRequired);
   return String(process.env.KEYFRAME_REQUIRED || '').toLowerCase() === 'true';
+}
+
+function scenePlateRequirementEnabled(mediaProvider = null) {
+  const mode = String(process.env.SCENE_PLATE_REQUIRED || 'auto').trim().toLowerCase();
+  if (['false', 'off', '0', 'no'].includes(mode)) return false;
+  if (['true', 'on', '1', 'yes'].includes(mode)) return true;
+  return Boolean(mediaProvider?.scenePlateWorkflowPath || process.env.COMFYUI_SCENE_PLATE_WORKFLOW_PATH);
 }
 
 /**
@@ -508,7 +519,7 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
           const idempotencyKey = String(req.headers['idempotency-key'] || body.idempotencyKey || '').trim() || randomUUID();
           const duplicate = getGenerationTaskByIdempotency(db, project.id, 'reference_candidates', idempotencyKey);
           if (duplicate) return ok(res, { ...projectState(db, project.id), task: generationTaskDto(duplicate) }, 202);
-          const count = Math.max(1, Math.min(4, Number(body.count || 4)));
+          const count = Math.max(1, Math.min(entityKind === 'scene' ? 5 : 4, Number(body.count || 4)));
           const task = createGenerationTask(db, {
             id: randomUUID(), projectId: project.id, type: 'reference_candidates',
             configuration: {
@@ -777,12 +788,78 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         }
       }
 
+      if (parts[0] === 'media-assets' && parts[1] && method === 'POST' && parts[2] === 'edit-tasks' && parts.length === 3) {
+        const asset = getMediaAsset(db, parts[1]);
+        if (!asset) throw new ApiError(404, 'MEDIA_ASSET_NOT_FOUND', '媒体资产不存在');
+        if (asset.status !== 'ready') throw new ApiError(409, 'SOURCE_ASSET_NOT_READY', '只能调整当前可用的图片');
+        const project = getProject(db, asset.project_id);
+        if (!project) throw new ApiError(404, 'PROJECT_NOT_FOUND', '作品不存在');
+        const editable = isReferenceAsset(asset)
+          || ['shot_scene_plate_candidate', 'shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate'].includes(asset.type);
+        if (!editable) throw new ApiError(400, 'ASSET_NOT_EDITABLE', '该图片类型不支持提示词调整');
+        const body = await readJson(req);
+        const prompt = cleanSourceText(requireString(String(body.prompt || ''), '调整提示词', { max: 2000 }));
+        if (!prompt) throw new ApiError(400, 'EMPTY_EDIT_PROMPT', '请输入需要调整的内容');
+        const idempotencyKey = String(req.headers['idempotency-key'] || body.idempotencyKey || '').trim() || randomUUID();
+        const duplicate = getGenerationTaskByIdempotency(db, project.id, 'asset_edit', idempotencyKey);
+        if (duplicate) return ok(res, { ...projectState(db, project.id), task: generationTaskDto(duplicate) }, 202);
+        const requestedCount = Number(body.count);
+        const count = Number.isFinite(requestedCount) ? Math.max(1, Math.min(3, Math.trunc(requestedCount))) : 2;
+        const requestedDenoise = body.denoise === undefined || body.denoise === null || body.denoise === ''
+          ? NaN
+          : Number(body.denoise);
+        const denoise = Number.isFinite(requestedDenoise)
+          ? Math.max(0, Math.min(1, requestedDenoise))
+          : Math.max(0, Math.min(1, Number(mediaProvider?.keyframeDenoise ?? 0.82)));
+        const isScenePlate = asset.type === 'shot_scene_plate_candidate';
+        const isKeyframe = ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate'].includes(asset.type);
+        const task = createGenerationTask(db, {
+          id: randomUUID(), projectId: project.id, type: 'asset_edit',
+          configuration: {
+            sourceAssetId: asset.id,
+            scope: isScenePlate ? 'scene_plate' : isKeyframe ? 'keyframe' : 'reference',
+            prompt,
+            count,
+            denoise,
+            seed: normalizeSeed(body.seed),
+          },
+          provider: mediaProvider.provider,
+          model: mediaProvider.model,
+          idempotencyKey,
+        });
+        mediaRunner.enqueue(task.id);
+        return ok(res, { ...projectState(db, project.id), task: generationTaskDto(task) }, 202);
+      }
+
       if (parts[0] === 'media-assets' && parts[1] && method === 'POST' && parts[2] === 'select' && parts.length === 3) {
         const asset = getMediaAsset(db, parts[1]);
         if (!asset) throw new ApiError(404, 'MEDIA_ASSET_NOT_FOUND', '媒体资产不存在');
         const project = getProject(db, asset.project_id);
         if (!project) throw new ApiError(404, 'PROJECT_NOT_FOUND', '作品不存在');
         const body = await readJson(req);
+        if (asset.type === 'shot_scene_plate_candidate') {
+          const shot = asset.shot_id ? getSegmentShot(db, asset.shot_id) : null;
+          if (!shot) throw new ApiError(404, 'SHOT_NOT_FOUND', '镜头不存在');
+          const updatedShot = updateSegmentShot(db, shot.id, {
+            selected_scene_plate_asset_id: asset.id,
+            selected_keyframe_asset_id: null,
+            keyframe_status: 'missing',
+            motion_signature: null,
+            generation_signature: null,
+            updated_at: timestamp(),
+          });
+          const siblings = listMediaAssets(db, { shotId: shot.id })
+            .filter(candidate => candidate.type === 'shot_scene_plate_candidate');
+          for (const candidate of siblings) {
+            const metadata = { ...(candidate.metadata || {}), selected: candidate.id === asset.id };
+            updateMediaAsset(db, candidate.id, { status: 'ready', metadata_json: JSON.stringify(metadata) });
+          }
+          for (const keyframe of listMediaAssets(db, { shotId: shot.id }).filter(candidate => ['shot_keyframe_candidate', 'shot_keyframe_selected', 'shot_endframe_candidate'].includes(candidate.type))) {
+            updateMediaAsset(db, keyframe.id, { status: 'stale' });
+          }
+          invalidateSelectedKeyframeDependents(db, shot.id);
+          return ok(res, { shot: segmentShotDto(updatedShot), selectedAsset: mediaAssetDto(getMediaAsset(db, asset.id)) });
+        }
         if (isReferenceAsset(asset)) {
           const bible = getLatestVisualBible(db, project.id, project.active_script_version_id);
           if (!bible) throw new ApiError(409, 'VISUAL_BIBLE_NOT_FOUND', '视觉设定不存在');
@@ -966,6 +1043,34 @@ export function createApi({ db, runner, provider, mediaRunner, mediaProvider, ex
         return ok(res, { ...projectState(db, project.id), task: generationTaskDto(task) }, 202);
       }
 
+      if (parts[0] === 'shots' && parts[1] && method === 'POST' && parts[2] === 'scene-plate-tasks' && parts.length === 3) {
+        const shot = getSegmentShot(db, parts[1]);
+        if (!shot) throw new ApiError(404, 'SHOT_NOT_FOUND', '镜头不存在');
+        const plan = shot.storyboard_plan_id ? getStoryboardPlan(db, shot.storyboard_plan_id) : null;
+        const project = plan ? getProject(db, plan.project_id) : null;
+        const bible = project ? getLatestVisualBible(db, project.id, plan?.script_version_id || project.active_script_version_id) : null;
+        if (!project || !bible) throw new ApiError(409, 'VISUAL_BIBLE_NOT_FOUND', '请先生成视觉设定');
+        const body = await readJson(req);
+        const idempotencyKey = String(req.headers['idempotency-key'] || body.idempotencyKey || '').trim() || randomUUID();
+        const duplicate = getGenerationTaskByIdempotency(db, project.id, 'scene_plate_candidates', idempotencyKey);
+        if (duplicate) return ok(res, { ...projectState(db, project.id), task: generationTaskDto(duplicate) }, 202);
+        const requestedCount = Number(body.count);
+        const count = Number.isFinite(requestedCount) ? Math.max(1, Math.min(3, Math.trunc(requestedCount))) : 2;
+        const frameType = body.frameType === 'end' ? 'end' : 'start';
+        const task = createGenerationTask(db, {
+          id: randomUUID(), projectId: project.id, type: 'scene_plate_candidates',
+          configuration: {
+            shotId: shot.id, count, frameType, promptOverride: String(body.promptOverride || '').slice(0, 3000),
+            seed: normalizeSeed(body.seed), visualBibleId: bible.id,
+            requireScenePlate: scenePlateRequirementEnabled(mediaProvider),
+            visualBibleHash: visualBibleContentHash(bible.content), width: body.width || null, height: body.height || null,
+          },
+          provider: mediaProvider.provider, model: mediaProvider.model, idempotencyKey,
+        });
+        mediaRunner.enqueue(task.id);
+        return ok(res, { ...projectState(db, project.id), task: generationTaskDto(task) }, 202);
+      }
+
       if (parts[0] === 'shots' && parts[1] && method === 'POST' && parts[2] === 'keyframe-tasks' && parts.length === 3) {
         const shot = getSegmentShot(db, parts[1]);
         if (!shot) throw new ApiError(404, 'SHOT_NOT_FOUND', '镜头不存在');
@@ -1072,6 +1177,7 @@ function segmentShotDto(shot) {
     focalLengthMm: shot.focal_length_mm, composition: shot.composition, purpose: shot.narrative_purpose,
     selectionReason: shot.selection_reason, evidenceIds: shot.evidence_ids || [], promptZh: shot.prompt_zh, promptEn: shot.prompt_en,
     generationSpec: shot.generation_spec || {},
+    selectedScenePlateAssetId: shot.selected_scene_plate_asset_id || null,
     durationMs: shot.duration_ms, duration: formatDuration(shot.duration_ms), status: shot.status,
   };
 }

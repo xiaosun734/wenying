@@ -1,0 +1,4 @@
+# 用途：片段任务没有已规划镜头时，生成默认的视频画面提示词。
+# 调用位置：server/media-task.mjs 的 defaultPrompt()。
+# 可用占位符：{genre}、{summaryOrTitle}。
+{genre}小说场景，{summaryOrTitle}，人物动作与解说内容一致，电影级构图

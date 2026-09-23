@@ -1,0 +1,8 @@
+# 用途：向导演分析模型传入题材、背景、全片配置和待分析的文案片段。
+# 调用位置：server/providers/openai-compatible.mjs 的 generateDirectorAnalysis()。
+# 可用占位符：{genre}、{background}、{configuration}、{segments}、{idempotencyKey}。
+题材：{genre}
+背景设定：{background}
+全片配置：{configuration}
+片段：{segments}
+任务：{idempotencyKey}

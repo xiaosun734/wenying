@@ -71,6 +71,15 @@ const REFERENCE_VARIANTS = {
       label: '高机位斜俯视',
       instruction: '同一场景的高机位斜俯视参考，无人物；清楚展示空间轴线、地形边界、建筑与主要物体的位置关系，场景身份、材质和光照保持一致',
     },
+    {
+      id: 'interior-medium',
+      label: '内部中景机位',
+      promptStyle: 'framing-first',
+      instruction: '同一场景的内部中景机位参考，无人物；摄影机必须进入场景内部、取平视中景，'
+        + '画面不再显示整座场景的全景，也不采用俯拍母版构图；'
+        + '前景交代地面材质与近处结构，中景为核心物体，远景保留部分建筑作为背景；'
+        + '建筑布局、地形、主要物体位置、材质、光照和色板必须与正面轴线母版完全一致，只改变摄影机位置和景别',
+    },
   ],
   prop: [
     { id: 'isolated', label: '单体三视图', instruction: '道具单体设定图，正面、侧面和背面结构完整，纯色背景' },
@@ -81,9 +90,10 @@ const REFERENCE_VARIANTS = {
 };
 export function normalizeVisualBibleContent(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
-  const characters = normalizeEntities(source.characters, 'character', ['name', 'appearance', 'costume', 'age', 'face', 'hair', 'body']);
-  const scenes = normalizeEntities(source.scenes, 'scene', ['name', 'description', 'layout', 'lighting', 'colorPalette']);
-  const props = normalizeEntities(source.props || source.propReferences, 'prop', ['name', 'description', 'material', 'state']);
+  const classified = reclassifyVisualEntities(source);
+  const characters = normalizeEntities(classified.characters, 'character', ['name', 'appearance', 'costume', 'age', 'face', 'hair', 'body']);
+  const scenes = normalizeEntities(classified.scenes, 'scene', ['name', 'description', 'layout', 'lighting', 'colorPalette']);
+  const props = normalizeEntities(classified.props, 'prop', ['name', 'description', 'material', 'state']);
   return {
     ...source,
     schemaVersion: Math.max(VISUAL_BIBLE_SCHEMA_VERSION, Number(source.schemaVersion || 0)),
@@ -103,16 +113,86 @@ function normalizeEntities(values, kind, fields) {
     let entityId = String(item.entityId || item.id || '').trim() || stableEntityId(kind, name, index);
     while (used.has(entityId)) entityId = `${entityId}-${index + 1}`;
     used.add(entityId);
+    const reclassifiedFrom = String(item.reclassifiedFrom || '').trim();
+    const reclassifiedNow = Boolean(item._reclassifiedNow);
     const output = { ...item, entityId, kind, name, locked: Boolean(item.locked) };
     for (const field of fields) {
       if (output[field] === undefined || output[field] === null) output[field] = '';
       if (typeof output[field] === 'string') output[field] = output[field].trim();
     }
-    output.referenceAssetIds = uniqueStrings(item.referenceAssetIds);
-    output.selectedReferenceAssetId = String(item.selectedReferenceAssetId || '').trim() || null;
+    output.referenceAssetIds = reclassifiedNow ? [] : uniqueStrings(item.referenceAssetIds);
+    output.selectedReferenceAssetId = reclassifiedNow
+      ? null
+      : String(item.selectedReferenceAssetId || '').trim() || null;
     output.forbiddenElements = uniqueStrings(item.forbiddenElements);
+    if (reclassifiedNow) {
+      output.locked = false;
+    }
+    if (reclassifiedFrom && reclassifiedFrom !== kind) output.reclassifiedFrom = reclassifiedFrom;
+    delete output._reclassifiedNow;
+    if (kind === 'scene') output.spatialAnchors = uniqueStrings(item.spatialAnchors);
     return output;
   });
+}
+
+const SCENE_NAME_TERMS = /场地|广场|学校|学院|教室|大厅|地铁|车站|站台|走廊|隧道|街道|城市|房间|屋|殿|宫|馆|院|楼|层|平台|天台|庭院|花园|森林|山谷|洞穴|桥|入口|出口|空间|地点|仓库|基地|大宅|公寓|办公室|实验室|走廊|码头|机场|车厢/;
+const PROP_NAME_TERMS = /石|晶|剑|刀|枪|卡|牌|盒|钥匙|戒指|项链|药|符|书|手机|屏幕|门|衣|袍|鞋|包|灯|镜|球|珠|杖|令牌|手环|挂件|宝石|水晶|神器|道具|物品|装置|信|地图|徽章|面具|头盔|法器|丹药/;
+const CHARACTER_FIELDS = ['age', 'face', 'hair', 'body', 'costume'];
+const SCENE_FIELDS = ['layout', 'lighting', 'colorPalette', 'spatialAnchors'];
+const PROP_FIELDS = ['material', 'state'];
+
+function reclassifyVisualEntities(source = {}) {
+  const characters = [];
+  const scenes = [];
+  const props = [];
+  const groups = [
+    ['character', source.characters],
+    ['scene', source.scenes],
+    ['prop', source.props || source.propReferences],
+  ];
+  for (const [declaredKind, values] of groups) {
+    for (const value of Array.isArray(values) ? values : []) {
+      const item = value && typeof value === 'object' ? { ...value } : {};
+      const inferredKind = inferVisualEntityKind(item, declaredKind);
+      if (inferredKind !== declaredKind) {
+        item.reclassifiedFrom = declaredKind;
+        item._reclassifiedNow = true;
+      }
+      if (inferredKind === 'scene') scenes.push(item);
+      else if (inferredKind === 'prop') props.push(item);
+      else characters.push(item);
+    }
+  }
+  return { characters, scenes, props };
+}
+
+function inferVisualEntityKind(item = {}, declaredKind = 'character') {
+  const characterSignals = CHARACTER_FIELDS.filter(field => meaningful(item[field])).length;
+  const sceneSignals = SCENE_FIELDS.filter(field => meaningful(item[field])).length;
+  const propSignals = PROP_FIELDS.filter(field => meaningful(item[field])).length;
+  const name = String(item.name || item.label || '').trim();
+  const description = String(item.description || item.appearance || '').trim();
+  const looksLikeScene = SCENE_NAME_TERMS.test(name) || /室内|户外|空间|区域|建筑|场地|房间/.test(description);
+  const looksLikeProp = PROP_NAME_TERMS.test(name) || /道具|物品|装置|掌心大小|可携带|工具/.test(description);
+  if (declaredKind === 'scene' && looksLikeScene) return 'scene';
+  if (declaredKind === 'prop' && looksLikeProp) return 'prop';
+
+  if (declaredKind === 'character' && characterSignals === 0) {
+    if (looksLikeScene) return 'scene';
+    if (looksLikeProp) return 'prop';
+    if (sceneSignals >= 2) return 'scene';
+    if (propSignals > 0 && !looksLikeScene) return 'prop';
+  }
+  if (declaredKind === 'scene' && characterSignals >= 2 && sceneSignals === 0) return 'character';
+  if (declaredKind === 'prop' && characterSignals >= 2 && propSignals === 0 && !looksLikeProp) return 'character';
+  if (declaredKind !== 'prop' && looksLikeProp && characterSignals === 0) return 'prop';
+  if (declaredKind !== 'scene' && looksLikeScene && characterSignals === 0) return 'scene';
+  return declaredKind;
+}
+
+function meaningful(value) {
+  if (Array.isArray(value)) return value.some(item => meaningful(item));
+  return Boolean(String(value || '').trim());
 }
 
 export function getVisualEntity(content, kind, entityId) {
@@ -229,6 +309,9 @@ export function compileReferencePrompt({ entity, kind, visualBible = {}, configu
   const selectedVariant = variant || referenceVariants(kind)[0] || REFERENCE_VARIANTS.prop[0];
   const resolvedStyle = resolveVisualStyle(bible, configuration);
   const style = kind === 'character' ? characterSafeStyle(resolvedStyle) : resolvedStyle;
+  if (kind === 'scene' && selectedVariant.promptStyle === 'framing-first') {
+    return compileFramingFirstScenePrompt({ entity, variant: selectedVariant, style, bible });
+  }
   const multiViewSheet = selectedVariant.id === 'three-view';
   const common = [
     `统一的${style}视觉风格`,
@@ -270,7 +353,34 @@ export function compileReferencePrompt({ entity, kind, visualBible = {}, configu
   }
   const forbidden = Array.isArray(entity.forbiddenElements) ? entity.forbiddenElements.filter(Boolean) : [];
   if (forbidden.length) common.push(`禁止出现：${forbidden.join('、')}`);
+  // 机位/构图指令必须排在最前面：放到最后会被前面一大段场景设定盖掉，
+  // 场景一旦被描述成"广角母版"，模型就会一直交俯拍全景。
+  const framingIndex = common.indexOf(selectedVariant.instruction);
+  if (framingIndex > 0) {
+    common.splice(framingIndex, 1);
+    common.unshift(`构图与机位：${selectedVariant.instruction}`);
+  }
   return common.filter(Boolean).join('；');
+}
+
+/**
+ * 机位图（内部中景等）走"构图优先"的短提示词：先把景别 / 机位说清楚，只带少量
+ * 关键要素、光照和色板。实测把整段场景设定拼在前面时，模型会退回广角俯视母版；
+ * 换成这套短提示词后，摄影机才会真的进入场景内部。
+ */
+function compileFramingFirstScenePrompt({ entity, variant, style, bible }) {
+  const characterNames = (bible.characters || []).map(item => item.name);
+  const keyFacts = sceneSafeDescription(cleanEntityText(entity.description), { characterNames }).replace(/\s+/g, ' ').slice(0, 140);
+  const lighting = cleanEntityText(entity.lighting).replace(/\s+/g, ' ').slice(0, 90);
+  const palette = cleanEntityText(entity.colorPalette).replace(/\s+/g, ' ').slice(0, 70);
+  return [
+    `构图与机位：${variant.instruction}`,
+    keyFacts ? `关键要素：${keyFacts}` : '',
+    lighting ? `光照：${lighting}` : '',
+    palette ? `色板：${palette}` : '',
+    style,
+    '单张画面，无分格，无拼贴，无多视图排版，无文字水印',
+  ].filter(Boolean).join('；');
 }
 
 export function assetGenerationSignature(asset) {

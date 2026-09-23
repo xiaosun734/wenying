@@ -1,0 +1,8 @@
+# 用途：向视觉设定模型传入题材、背景、画面风格和口播片段。
+# 调用位置：server/providers/openai-compatible.mjs 的 generateVisualBible()。
+# 可用占位符：{genre}、{background}、{visualStyle}、{segments}、{idempotencyKey}。
+题材：{genre}
+背景设定：{background}
+画面风格：{visualStyle}
+口播片段：{segments}
+任务：{idempotencyKey}

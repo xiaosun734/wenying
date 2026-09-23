@@ -32,6 +32,8 @@ export class ComfyUiMediaProvider {
     imageWorkflowManifestPath = '',
     keyframeWorkflowPath = '',
     keyframeWorkflowManifestPath = '',
+    scenePlateWorkflowPath = '',
+    scenePlateWorkflowManifestPath = '',
     keyframeDenoise = 0.82,
     useReferenceForKeyframes = true,
     imageNegativePrompt = '',
@@ -61,6 +63,8 @@ export class ComfyUiMediaProvider {
     this.imageWorkflowManifestPath = imageWorkflowManifestPath ? resolve(imageWorkflowManifestPath) : '';
     this.keyframeWorkflowPath = keyframeWorkflowPath ? resolve(keyframeWorkflowPath) : '';
     this.keyframeWorkflowManifestPath = keyframeWorkflowManifestPath ? resolve(keyframeWorkflowManifestPath) : '';
+    this.scenePlateWorkflowPath = scenePlateWorkflowPath ? resolve(scenePlateWorkflowPath) : '';
+    this.scenePlateWorkflowManifestPath = scenePlateWorkflowManifestPath ? resolve(scenePlateWorkflowManifestPath) : '';
     this.keyframeDenoise = Math.max(0, Math.min(1, Number(keyframeDenoise) || 0.82));
     this.useReferenceForKeyframes = Boolean(useReferenceForKeyframes);
     this.imageNegativePrompt = String(imageNegativePrompt || '');
@@ -91,6 +95,7 @@ export class ComfyUiMediaProvider {
       { label: 'video', workflowPath: this.workflowPath, manifestPath: this.workflowManifestPath },
       { label: 'image', workflowPath: this.imageWorkflowPath, manifestPath: this.imageWorkflowManifestPath },
       { label: 'keyframe', workflowPath: this.keyframeWorkflowPath, manifestPath: this.keyframeWorkflowManifestPath },
+      { label: 'scene-plate', workflowPath: this.scenePlateWorkflowPath, manifestPath: this.scenePlateWorkflowManifestPath },
     ];
     const results = [];
     for (const pair of pairs) {
@@ -182,15 +187,22 @@ export class ComfyUiMediaProvider {
   async generateImage({
     project, prompt, negativePrompt = '', seed, filenamePrefix = 'image',
     width, height, referenceImagePath = null, referenceImagePaths = [], metadata = {}, negativeOverride = false,
+    denoise, mode = 'auto',
   }) {
-    const useReference = Boolean(referenceImagePath && this.keyframeWorkflowPath && this.useReferenceForKeyframes);
-    const workflowPath = useReference ? this.keyframeWorkflowPath : this.imageWorkflowPath;
-    const manifestPath = useReference ? this.keyframeWorkflowManifestPath : this.imageWorkflowManifestPath;
+    const requestedEditWorkflow = mode === 'scenePlate' ? this.scenePlateWorkflowPath : this.keyframeWorkflowPath;
+    const requestedEditManifest = mode === 'scenePlate' ? this.scenePlateWorkflowManifestPath : this.keyframeWorkflowManifestPath;
+    const useReference = Boolean(referenceImagePath && requestedEditWorkflow && this.useReferenceForKeyframes);
+    const workflowPath = useReference ? requestedEditWorkflow : this.imageWorkflowPath;
+    const manifestPath = useReference ? requestedEditManifest : this.imageWorkflowManifestPath;
     this.assertConfigured(workflowPath);
     const manifest = await loadWorkflowManifest(manifestPath);
     const workflow = await this.loadWorkflow(workflowPath, manifest);
     const imageWidth = Math.max(64, Number(width || this.imageWidth) || 576);
     const imageHeight = Math.max(64, Number(height || this.imageHeight) || 1024);
+    const requestedDenoise = denoise === undefined || denoise === null || denoise === '' ? NaN : Number(denoise);
+    const imageDenoise = Number.isFinite(requestedDenoise)
+      ? Math.max(0, Math.min(1, requestedDenoise))
+      : this.keyframeDenoise;
     const imageSeed = seed === undefined || seed === null || seed === '' ? Math.floor(Math.random() * 2 ** 31) : Number(seed);
     const clientId = randomUUID();
     const uploadedImage = useReference ? await this.uploadInputImage(clientId, referenceImagePath) : null;
@@ -219,7 +231,7 @@ export class ComfyUiMediaProvider {
       seed: imageSeed,
       width: imageWidth,
       height: imageHeight,
-      denoise: this.keyframeDenoise,
+      denoise: imageDenoise,
       startImage: uploadedImage || undefined,
       referenceImages: uploadedCompanions,
       filenamePrefix: `wenying/${safePart(project.id)}/visual-assets/${safePart(filenamePrefix)}`,
@@ -257,6 +269,7 @@ export class ComfyUiMediaProvider {
         type: output.type || 'output',
         workflowPath,
         workflowManifestPath: manifestPath || null,
+        generationMode: mode,
         manifestProfileId: prepared.manifestProfileId,
         width: imageWidth,
         height: imageHeight,

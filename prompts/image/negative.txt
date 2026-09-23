@@ -1,0 +1,4 @@
+# 用途：参考图、镜头背景板和关键帧图片生成的统一负面提示词。
+# 调用位置：server/providers/media.mjs 创建 ComfyUI Provider 时读取。
+# 主要抑制：分格、拼贴、文字、水印、重复人物和错误排版。
+分格，多格漫画，拼贴，上下分屏，左右分屏，重复人物，排版，可读数字，可读文字，中文文字，字幕，水印，边框，collage，split screen，storyboard，comic panels，multiple frames，contact sheet，diptych，triptych

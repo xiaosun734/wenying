@@ -148,6 +148,7 @@ test('keeps the checked-in workflow and manifest pairs consistent', async () => 
     ['workflows/z-image-turbo-t2i-api.json', 'workflows/manifests/z-image-turbo-t2i.json'],
     ['workflows/krea2-keyframe-img2img-api.json', 'workflows/manifests/krea2-keyframe-img2img.json'],
     ['workflows/qwen-image-edit-keyframe-api.json', 'workflows/manifests/qwen-image-edit-keyframe.json'],
+    ['workflows/qwen-image-scene-plate-api.json', 'workflows/manifests/qwen-image-scene-plate.json'],
   ];
   for (const [workflowPath, manifestPath] of pairs) {
     const result = await verifyWorkflowPair(resolve(workflowPath), resolve(manifestPath));

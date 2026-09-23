@@ -563,7 +563,7 @@ test('generates media tasks, assets, and supports idempotent segment regeneratio
   assert.ok(planned.body.storyboardPlan.shotSelection.segments.length >= 1);
   const firstShot = planned.body.segments[0].shots[0];
   assert.ok(firstShot.plot && firstShot.shotSize && firstShot.movement && firstShot.angle && firstShot.purpose);
-  assert.equal(firstShot.generationSpec.version, 'generation-spec-v5');
+  assert.equal(firstShot.generationSpec.version, 'generation-spec-v6');
   assert.ok(firstShot.generationSpec.visibleAction);
   assert.ok(firstShot.generationSpec.motionPrompt);
   assert.ok(firstShot.focalLengthMm >= 12);
@@ -684,7 +684,7 @@ test('keyframe task hands both the character and the scene reference to the imag
   const scene = state.visualBible.content.scenes[0];
   assert.ok(character?.entityId && scene?.entityId);
 
-  for (const entity of [{ kind: 'character', id: character.entityId, count: 1 }, { kind: 'scene', id: scene.entityId, count: 4 }]) {
+  for (const entity of [{ kind: 'character', id: character.entityId, count: 1 }, { kind: 'scene', id: scene.entityId, count: 5 }]) {
     const batch = await request(`/projects/${project.id}/reference-assets`, {
       method: 'POST', headers: { 'idempotency-key': `reference-${entity.kind}-${project.id}` },
       body: JSON.stringify({ entityKind: entity.kind, entityId: entity.id, count: entity.count }),

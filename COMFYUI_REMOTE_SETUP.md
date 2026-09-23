@@ -18,7 +18,7 @@ workflows/video_wan2_2_5b_i2v_api.json
 
 这里必须是 **API Format**，不能直接把普通的 `Save` 工作流 JSON 放进来。普通工作流通常包含 `nodes` 和画布信息，而后端提交 `/prompt` 需要的是节点 ID 到节点配置的映射。
 
-ComfyUI 的负面提示词通过 `.env` 中的 `COMFYUI_NEGATIVE_PROMPT` 配置，服务会把它写入工作流可识别的负向 `CLIPTextEncode` 节点。
+ComfyUI 的负面提示词默认读取 `prompts/video/negative.txt`；同名环境变量 `COMFYUI_NEGATIVE_PROMPT` 仍可覆盖文件内容。服务会把它写入工作流可识别的负向 `CLIPTextEncode` 节点。
 
 三个环节（视频 / 图像 / 关键帧）各自需要一份 manifest，用来声明提示词、seed、尺寸、首帧、帧率和 denoise 写在哪个节点上：
 
@@ -170,13 +170,17 @@ GGUF 权重需要远程 ComfyUI 安装 **ComfyUI-GGUF**（作者 city96，ComfyU
    COMFYUI_KEYFRAME_WORKFLOW_PATH=./workflows/qwen-image-edit-keyframe-api.json
    COMFYUI_KEYFRAME_WORKFLOW_MANIFEST_PATH=./workflows/manifests/qwen-image-edit-keyframe.json
    COMFYUI_KEYFRAME_DENOISE=1
+   COMFYUI_SCENE_PLATE_WORKFLOW_PATH=./workflows/qwen-image-scene-plate-api.json
+   COMFYUI_SCENE_PLATE_WORKFLOW_MANIFEST_PATH=./workflows/manifests/qwen-image-scene-plate.json
+   SCENE_PLATE_REQUIRED=auto
    ```
 
-    `denoise` 必须是 1：编辑工作流把场景画布经 `VAEEncode` 接进 `latent_image`（场景图是"被编辑的那张图"），角色三视图作为条件参考注入；旧的 img2img 工作流才用 0.82。
+    `denoise` 必须是 1：关键帧编辑工作流把已选背景板经 `VAEEncode` 接进 `latent_image`，角色三视图作为条件参考注入；场景背景板工作流则使用空 latent 采样，只把场景参考图作为视觉条件，因此不会直接继承场景母版的构图。
 4. 重启服务，日志出现下面这行即生效：
 
    ```text
    ComfyUI keyframe 工作流：i2i / qwen-image-edit-2511-gguf-keyframe
+   ComfyUI scene-plate 工作流：i2i / qwen-image-scene-plate-2511
    ```
 
 ### 采样参数
@@ -196,7 +200,7 @@ GGUF 权重需要远程 ComfyUI 安装 **ComfyUI-GGUF**（作者 city96，ComfyU
 
 ### 参考图是怎么选的
 
-- 主参考（`startImage`）：有可见主体时优先角色参考图，否则用场景母版。
+- 关键帧主参考（`startImage`）：默认使用已确认的镜头背景板；未启用两阶段背景板时兼容回退到场景或角色参考图。
 - 补充参考（`referenceImages`）：再按“场景 → 角色 → 道具”各取一张，最多两张。
 
 单图工作流不会声明 `referenceImages`，补充参考图会被自动跳过（既不上传也不进工作流）。
